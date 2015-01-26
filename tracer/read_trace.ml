@@ -256,7 +256,22 @@ let process_trace elements =
   let states = List.rev states in
   Printf.printf "loaded %d states\n%!" (List.length states)
 
+let timestamp file =
+  match
+    try Some (Scanf.sscanf file "%.05f" (fun x -> x))
+    with _ -> None
+  with
+  | Some ts ->
+    let tm = Unix.gmtime ts in
+    let date = Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d"
+        (1900 + tm.Unix.tm_year) (succ tm.Unix.tm_mon) tm.Unix.tm_mday
+        tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
+    in
+    Printf.printf "trace from %s\n%!" date
+  | None -> Printf.printf "cannot find timestamp\n%!"
+
 let load file =
+  timestamp (Filename.basename file) ;
   match try Some (load_sexp file) with _ -> None with
     | None -> Printf.printf "error loading %s\n" file
     | Some (List xs) -> process_trace xs ; ()
