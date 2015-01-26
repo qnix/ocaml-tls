@@ -134,6 +134,13 @@ Executable "test_client"
   MainIs          : test_client.ml
   BuildDepends    : tls.lwt
 
+Executable "trace_reader"
+  Path            : tracer
+  Install         : false
+  CompiledObject  : native
+  MainIs          : read_trace.ml
+  BuildDepends    : sexplib, tls
+
 Document api
   Title: Documentation and API reference
   Abstract: OCaml-TLS implements transport layer security in OCaml. It consists
