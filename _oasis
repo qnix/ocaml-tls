@@ -134,11 +134,17 @@ Executable "test_client"
   MainIs          : test_client.ml
   BuildDepends    : tls.lwt
 
+Library "tracing"
+  Path            : tracer/
+  Modules         : Read_trace
+  Install         : false
+  BuildDepends    : sexplib, sexplib.syntax, tls
+
 Executable "trace_reader"
   Path            : tracer
   Install         : false
   CompiledObject  : native
-  MainIs          : read_trace.ml
+  MainIs          : trace_reader.ml
   BuildDepends    : sexplib, tls
 
 Document api
