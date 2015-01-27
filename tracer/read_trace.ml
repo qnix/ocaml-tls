@@ -234,48 +234,80 @@ let conv_state maybe_st all = function
       State.{ handshake ; decryptor ; encryptor ; fragment }
     | _ -> assert false
 
+type trace = [
+  | `StateIn of State.state
+  | `StateOut of State.state
+  | `RecordIn of Core.tls_hdr * Cstruct_s.t
+  | `RecordOut of Packet.content_type * Cstruct_s.t
+  | `ApplicationDataIn of Cstruct_s.t
+]
+
 let process_sexp acc x =
-  let top = match acc with
+  let states = Utils.filter_map
+      ~f:(function `StateIn x -> Some x | `StateOut x -> Some x | _ -> None)
+      acc
+  in
+  let top = match states with
     | [] -> None
     | x::_ -> Some x
   in
   match x with
   | List [ Atom "state-in" ; xs ] ->
-    Printf.printf "got state in\n" ;
-    let state = conv_state top acc xs in
-    state :: acc
+    let state = conv_state top states xs in
+    (`StateIn state) :: acc
   | List [ Atom "state-out" ; xs ] ->
-    Printf.printf "got state out\n" ;
-    let state = conv_state top acc xs in
-    state :: acc
-  | List [ Atom x ; xs ] -> Printf.printf "gotx %s\n" x ; acc
-  | xs -> Printf.printf "unexpected\n" ; acc
+    let state = conv_state top states xs in
+    (`StateOut state) :: acc
+  | List [ Atom "record-in" ; List [ List [ List [ Atom "content_type" ; ct ] ; List [ Atom "version" ; ver ] ] ; data ] ] ->
+    let version = tls_ver_to_any_version (tls_ver_of_sexp ver)
+    and content_type = Packet.content_type_of_sexp ct
+    and data = Cstruct_s.t_of_sexp data
+    in
+    (`RecordIn (Core.{ content_type ; version }, data)) :: acc
+  | List [ Atom "record-out" ; record ] ->
+    (`RecordOut (State.record_of_sexp record)) :: acc
+  | List [ Atom "application-data-in" ; data ] ->
+    (`ApplicationDataIn (Cstruct_s.t_of_sexp data)) :: acc
+  | List [ Atom x ; xs ] -> (* Printf.printf "ignoring %s\n" x ; *) acc
+  | xs -> Printf.printf "unexpected %s\n" (to_string_hum xs) ; acc
 
-let process_trace elements =
-  let states = List.fold_left (fun acc ele -> process_sexp acc ele) [] elements in
-  let states = List.rev states in
-  Printf.printf "loaded %d states\n%!" (List.length states)
+let process_trace acc elements =
+  List.fold_left (fun acc ele -> process_sexp acc ele) acc elements
 
 let timestamp file =
-  match
-    try Some (Scanf.sscanf file "%.05f" (fun x -> x))
-    with _ -> None
-  with
-  | Some ts ->
-    let tm = Unix.gmtime ts in
-    let date = Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d"
-        (1900 + tm.Unix.tm_year) (succ tm.Unix.tm_mon) tm.Unix.tm_mday
-        tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
-    in
-    Printf.printf "trace from %s\n%!" date
-  | None -> Printf.printf "cannot find timestamp\n%!"
+  try Some (Scanf.sscanf file "%.05f" (fun x -> x))
+  with _ -> None
 
-let load file =
-  timestamp (Filename.basename file) ;
-  match try Some (load_sexp file) with _ -> None with
-    | None -> Printf.printf "error loading %s\n" file
-    | Some (List xs) -> process_trace xs ; ()
+let timestamp_to_string ts =
+  let tm = Unix.gmtime ts in
+  Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d"
+    (1900 + tm.Unix.tm_year) (succ tm.Unix.tm_mon) tm.Unix.tm_mday
+    tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
 
-let () =
-  match Sys.argv with
-  | [| _ ; file |] -> load file
+let load_single_file acc file =
+  match try Some (load_sexp file) with _ -> Printf.printf "error loading sexps\n" ; None with
+    | None -> []
+    | Some (List xs) -> process_trace acc xs
+
+let load filename =
+  match (Unix.stat filename).Unix.st_kind with
+  | Unix.S_DIR ->
+    let dir = Unix.opendir filename in
+    let file = ref (try Some (Unix.readdir dir) with End_of_file -> None) in
+    let acc = ref [] in
+    while not (!file = None) do
+      let Some filename = !file in
+      (match timestamp filename with
+       | Some x -> acc := (x, filename) :: !acc
+       | None -> () ) ;
+      file := try Some (Unix.readdir dir) with End_of_file -> None
+    done ;
+    (match List.map snd (List.sort (fun (a, _) (a', _) -> compare a a') !acc) with
+     | [] -> None
+     | x :: xs ->
+       Some (timestamp x,
+             List.rev
+               (List.fold_left (fun acc f -> load_single_file acc (Filename.concat filename f))
+                  [] (x :: xs))) )
+  | Unix.S_REG ->
+    Some (timestamp (Filename.basename filename), List.rev (load_single_file [] filename))
