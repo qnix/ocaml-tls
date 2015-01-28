@@ -44,18 +44,98 @@ let analyse_and_print traces =
 
 let handle file =
   match load file with
-  | None -> Printf.printf "error loading %s\n" file
+  | None -> Printf.printf "error loading %s\n" file ; None
   | Some (Some time, traces) ->
     let timestring = timestamp_to_string time in
     (* Printf.printf "trace from %s with %d elements\n" timestring (List.length traces) ; *)
-    analyse_and_print traces
+    (* analyse_and_print traces *)
+    Some (timestring, traces)
   | Some (None, traces) ->
-    Printf.printf "trace (no time) with %d elements\n" (List.length traces) ;
-    analyse_and_print traces
+    (* Printf.printf "trace (no time) with %d elements\n" (List.length traces) ; *)
+    (* analyse_and_print traces *)
+    Some ("", traces)
+
+
+let run dir file =
+  match dir, file with
+  | Some file, _ ->
+    let dirent = Unix.opendir file in
+    Unix.readdir dirent ; Unix.readdir dirent ;
+    let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in
+    let successes = Hashtbl.create 100
+    and failures = Hashtbl.create 100
+    in
+    let suc (ts, traces) name =
+      if Hashtbl.mem successes name then
+        let ele = Hashtbl.find successes name in
+        Printf.printf "replaced\n%!" ;
+        Hashtbl.replace successes name (succ ele)
+      else
+        Hashtbl.add successes name 1
+    and fails e name =
+      if Hashtbl.mem failures e then
+        let ele = Hashtbl.find failures e in
+        Hashtbl.replace failures e (name :: ele)
+      else
+        Hashtbl.add failures e [name]
+    in
+    while not (!filen = None) do
+      let Some filename = !filen in
+      (try
+         match handle (Filename.concat file filename) with
+         | Some x -> suc x filename
+         | None -> ()
+       with
+       | Trace_error e -> fails e filename
+       | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
+      filen := try Some (Unix.readdir dirent) with End_of_file -> None
+    done ;
+    Printf.printf "statistics: %d success size, %d failure size\n"
+      (Hashtbl.length successes) (Hashtbl.length failures) ;
+    Hashtbl.iter  (fun k v ->
+        Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
+      failures
+  | None, Some file ->
+    try (match handle file with
+        | Some (ts, traces) -> Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces)
+        | None -> Printf.printf "couldn't load any traces..." )
+    with
+    | Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e))
+
+
+let trace_dir = ref None
+let trace_file = ref None
+let rest = ref []
+
+let usage = "usage " ^ Sys.argv.(0)
+
+let arglist = [
+  ("-f", Arg.String (fun f -> trace_file := Some f), "trace file");
+  ("-d", Arg.String (fun d -> trace_dir := Some d), "trace directory");
+]
 
 let () =
-  match Sys.argv with
-  | [| _ ; file |] ->
-    try handle file
-    with
-    | Trace_error e -> Printf.printf "error %s\n%!" (Sexplib.Sexp.to_string_hum (sexp_of_error e))
+  Arg.parse arglist (fun x -> rest := x :: !rest) usage ;
+  run !trace_dir !trace_file
+
+(* results:
+tls0 - statistics: 6290 success size, 2 failure size
+reason InvalidHmacKey count 1
+reason (InvalidInitialState Established) count 178
+tls1 - statistics: 4319 success size, 1 failure size
+reason (InvalidInitialState Established) count 6
+tls2 - statistics: 4132 success size, 1 failure size
+reason (InvalidInitialState Established) count 9
+tls3 - statistics: 6949 success size, 1 failure size
+reason (InvalidInitialState Established) count 19
+tls4 - statistics: 12442 success size, 1 failure size
+reason (InvalidInitialState Established) count 68
+tls4-new - statistics: 1142 success size, 1 failure size
+reason (InvalidInitialState Established) count 1
+
+tls0 has an offending trace (which doesn't parse b4427fd723e11a0f)
+
+---->
+35274 traces
+
+*)
