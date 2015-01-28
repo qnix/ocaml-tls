@@ -190,11 +190,19 @@ let conv_handshake maybe_state = function
       List.fold_left (fun (session, ver, machina, config, hs_frag) ele ->
           match ele with
           | List [ Atom "version" ; x ] -> (session, Some (Core.tls_version_of_sexp x), machina, config, hs_frag)
-          | List [ Atom "reneg" ; x ] -> (session, ver, machina, config, hs_frag)
+          | List [ Atom "reneg" ; x ]
+          | List [ Atom "rekeying" ; x ] ->
+            let sessions = match option_of_sexp State.reneg_params_of_sexp x, session with
+              | None, s -> s
+              | Some r, Some (x::xs) ->
+                let sessions = { x with State.renegotiation = r } :: xs in
+                Some sessions
+              | Some _, _ -> assert false
+            in
+            (sessions, ver, machina, config, hs_frag)
           | List [ Atom "machina" ; x ] -> (session, ver, Some (conv_machina maybe_state x), config, hs_frag)
           | List [ Atom "config" ; List cfgs ] -> (session, ver, machina, Some (Config.config_of_sexp (List (List.map conv_config cfgs))), hs_frag)
-          | List [ Atom "hs_fragment" ; x ] -> (session, ver, machina, config, Some (Cstruct_s.t_of_sexp x))
-          | List [ Atom "rekeying" ; x ] -> (session, ver, machina, config, hs_frag))
+          | List [ Atom "hs_fragment" ; x ] -> (session, ver, machina, config, Some (Cstruct_s.t_of_sexp x)))
         (Some sessions, None, None, None, None) eles
     with
     | Some session, Some protocol_version, Some machina, Some config, Some hs_fragment ->
