@@ -261,6 +261,7 @@ type trace = [
   | `RecordIn of Core.tls_hdr * Cstruct_s.t
   | `RecordOut of Packet.content_type * Cstruct_s.t
   | `ApplicationDataIn of Cstruct_s.t
+  | `AlertOut of Core.tls_alert
 ]
 
 let process_sexp acc x =
@@ -311,6 +312,8 @@ let process_sexp acc x =
         | _ -> assert false
     in
     `State st :: acc
+  | List [ Atom "alert-out" ; alert ] ->
+    `AlertOut (Core.tls_alert_of_sexp alert) :: acc
   | List [ Atom x ; xs ] -> (* Printf.printf "ignoring %s\n" x ; *) acc
   | xs -> Printf.printf "unexpected %s\n" (to_string_hum xs) ; acc
 
@@ -332,6 +335,10 @@ let load_single_file acc file =
     | None -> []
     | Some (List xs) -> process_trace acc xs
 
+let eval_and_rev = function
+  | `AlertOut alert::_ as xs -> (Some (Core.sexp_of_tls_alert alert), List.rev xs)
+  | xs -> (None, List.rev xs)
+
 let load filename =
   match (Unix.stat filename).Unix.st_kind with
   | Unix.S_DIR ->
@@ -349,8 +356,8 @@ let load filename =
      | [] -> None
      | x :: xs ->
        Some (timestamp x,
-             List.rev
+             eval_and_rev
                (List.fold_left (fun acc f -> load_single_file acc (Filename.concat filename f))
                   [] (x :: xs))) )
   | Unix.S_REG ->
-    Some (timestamp (Filename.basename filename), List.rev (load_single_file [] filename))
+    Some (timestamp (Filename.basename filename), eval_and_rev (load_single_file [] filename))
