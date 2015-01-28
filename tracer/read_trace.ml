@@ -13,6 +13,15 @@ open Tls
 (* we currently focus on traces recorded by the server, thus some partial pattern matches
    (don't expect this to work for a client trace) *)
 
+(* since record-out is emitted after state-out, we install encryptor before record-out ccs *)
+
+(* since cipher_st is only partially marshaled, we treat it carefully (and recompute the ctx
+   for AwaitClientChangeCipherSpec), installing them on change-cipher-spec-out *)
+
+(* we also preserve session_data from the current handshake when we
+   sent out Finished (handshake-out Finished below), data structure
+   (of 0.3) has a session list in the handshake_state record *)
+
 let session_of_server s =
   let open State in
   match s with
@@ -93,14 +102,6 @@ let sexp_of_old_cc s =
 let sexp_of_old_cc_option = function
   | List [] -> None
   | List [ List xs ] -> Some (sexp_of_old_cc xs)
-
-let rec find_ccs = function
-  | [] -> assert false
-  | x::xs ->
-    ( match x.State.handshake.State.machina with
-      | State.Server (State.AwaitClientChangeCipherSpec (_, cc, sc, _)) -> (cc, sc)
-      | _ -> find_ccs xs )
-  | _::xs -> find_ccs xs
 
 let cc_checker old_cc new_cc =
   let sequence, iv, mac = sexp_of_old_cc old_cc in
@@ -192,7 +193,7 @@ let conv_cst mac old cst =
     assert (not (c.State.iv_mode = State.Random_iv)) ;
     (State.CBC { c with State.iv_mode = State.Iv iv })
 
-let conv_cc states last proj sexp =
+let conv_cc last proj sexp =
   match sexp_of_old_cc_option sexp with
   | None -> None
   | Some (sequence, cipher_state, mac) ->
@@ -200,13 +201,9 @@ let conv_cc states last proj sexp =
     | Some x ->
       let st = conv_cst mac x.State.cipher_st cipher_state in
       Some { x with State.sequence = sequence ; State.cipher_st = st }
-    | None ->
-      let cc = find_ccs states in
-      let cc = proj cc in
-      let st = conv_cst mac cc.State.cipher_st cipher_state in
-      Some { State.sequence = sequence ; State.cipher_st = st }
+    | None -> assert false
 
-let conv_state maybe_st all = function
+let conv_state maybe_st = function
   | List xs ->
     match
       List.fold_left (fun (hs, dec, enc, frag) x -> match x with
@@ -218,14 +215,14 @@ let conv_state maybe_st all = function
               | None -> None
               | Some x -> x.State.decryptor
             in
-            let dec = conv_cc all last snd xs in
+            let dec = conv_cc last snd xs in
             (hs, Some dec, enc, frag)
           | List [ Atom "encryptor" ; xs ] ->
             let last = match maybe_st with
               | None -> None
               | Some x -> x.State.encryptor
             in
-            let enc = conv_cc all last fst xs in
+            let enc = conv_cc last fst xs in
             (hs, dec, Some enc, frag)
           | List [ Atom "fragment" ; xs ] -> (hs, dec, enc, Some (Cstruct_s.t_of_sexp xs)) )
         (None, None, None, None) xs
@@ -237,6 +234,7 @@ let conv_state maybe_st all = function
 type trace = [
   | `StateIn of State.state
   | `StateOut of State.state
+  | `State of State.state
   | `RecordIn of Core.tls_hdr * Cstruct_s.t
   | `RecordOut of Packet.content_type * Cstruct_s.t
   | `ApplicationDataIn of Cstruct_s.t
@@ -244,7 +242,7 @@ type trace = [
 
 let process_sexp acc x =
   let states = Utils.filter_map
-      ~f:(function `StateIn x -> Some x | `StateOut x -> Some x | _ -> None)
+      ~f:(function `StateIn x -> Some x | `StateOut x -> Some x | `State x -> Some x | _ -> None)
       acc
   in
   let top = match states with
@@ -253,10 +251,10 @@ let process_sexp acc x =
   in
   match x with
   | List [ Atom "state-in" ; xs ] ->
-    let state = conv_state top states xs in
+    let state = conv_state top xs in
     (`StateIn state) :: acc
   | List [ Atom "state-out" ; xs ] ->
-    let state = conv_state top states xs in
+    let state = conv_state top xs in
     (`StateOut state) :: acc
   | List [ Atom "record-in" ; List [ List [ List [ Atom "content_type" ; ct ] ; List [ Atom "version" ; ver ] ] ; data ] ] ->
     let version = tls_ver_to_any_version (tls_ver_of_sexp ver)
@@ -268,6 +266,28 @@ let process_sexp acc x =
     (`RecordOut (State.record_of_sexp record)) :: acc
   | List [ Atom "application-data-in" ; data ] ->
     (`ApplicationDataIn (Cstruct_s.t_of_sexp data)) :: acc
+  | List [ Atom "change-cipher-spec-out" ; _ ] ->
+    let st = match top with
+      | None -> assert false
+      | Some x -> ( match x.State.handshake.State.machina with
+          | State.Server (State.AwaitClientChangeCipherSpec (_, enc, dec, _)) ->
+            { x with State.decryptor = Some dec ; State.encryptor = Some enc }
+          | _ -> assert false )
+    in
+    `State st :: acc
+  | List [ Atom "handshake-out" ; List [ Atom "Finished" ; _ ] ] ->
+    let st = match top with
+      | None -> assert false
+      | Some st ->
+        let hs = st.State.handshake in
+        match hs.State.machina with
+        | Server (State.AwaitClientFinished (session, _)) ->
+          let session = session :: hs.State.session in
+          let handshake = { hs with State.session = session } in
+          { st with State.handshake = handshake }
+        | _ -> assert false
+    in
+    `State st :: acc
   | List [ Atom x ; xs ] -> (* Printf.printf "ignoring %s\n" x ; *) acc
   | xs -> Printf.printf "unexpected %s\n" (to_string_hum xs) ; acc
 
