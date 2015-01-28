@@ -47,7 +47,7 @@ let handle file =
   | None -> Printf.printf "error loading %s\n" file
   | Some (Some time, traces) ->
     let timestring = timestamp_to_string time in
-    Printf.printf "trace from %s with %d elements\n" timestring (List.length traces) ;
+    (* Printf.printf "trace from %s with %d elements\n" timestring (List.length traces) ; *)
     analyse_and_print traces
   | Some (None, traces) ->
     Printf.printf "trace (no time) with %d elements\n" (List.length traces) ;
@@ -55,4 +55,7 @@ let handle file =
 
 let () =
   match Sys.argv with
-  | [| _ ; file |] -> handle file
+  | [| _ ; file |] ->
+    try handle file
+    with
+    | Trace_error e -> Printf.printf "error %s\n%!" (Sexplib.Sexp.to_string_hum (sexp_of_error e))

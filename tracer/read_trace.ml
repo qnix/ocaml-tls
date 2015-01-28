@@ -22,6 +22,21 @@ open Tls
    sent out Finished (handshake-out Finished below), data structure
    (of 0.3) has a session list in the handshake_state record *)
 
+type error =
+  | InvalidInitialState of string
+  | InvalidHmacKey
+  | InvalidSequenceNumber
+  | InvalidCipherState
+  | InvalidVersion
+  | InvalidIv
+with sexp
+
+exception Trace_error of error
+
+let fail e = raise (Trace_error e)
+
+let guard exp e = if exp then () else fail e
+
 let session_of_server s =
   let open State in
   match s with
@@ -59,7 +74,7 @@ let tls_ver_to_any_version = function
   | TLS_1_1 -> Core.(Supported TLS_1_1)
   | TLS_1_2 -> Core.(Supported TLS_1_2)
   | TLS_1_X (3, m) -> Core.TLS_1_X m
-  | TLS_1_X _ -> assert false
+  | TLS_1_X _ -> fail InvalidVersion
 
 open Sexp_ext
 
@@ -105,29 +120,32 @@ let sexp_of_old_cc_option = function
 
 let cc_checker old_cc new_cc =
   let sequence, iv, mac = sexp_of_old_cc old_cc in
-  assert (new_cc.State.sequence = sequence) ;
+  guard (new_cc.State.sequence = sequence) InvalidSequenceNumber;
   match new_cc.State.cipher_st with
   | State.Stream s ->
-    assert (iv = Stream) ;
-    assert (Nocrypto.Uncommon.Cs.equal s.State.hmac_secret mac)
+    guard (iv = Stream) InvalidCipherState ;
+    guard (Nocrypto.Uncommon.Cs.equal s.State.hmac_secret mac) InvalidHmacKey
   | State.CBC c ->
-    assert (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) ;
+    guard (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) InvalidHmacKey ;
     match c.State.iv_mode, iv with
-    | State.Iv x, Iv y -> assert (Nocrypto.Uncommon.Cs.equal x y)
+    | State.Iv x, Iv y -> guard (Nocrypto.Uncommon.Cs.equal x y) InvalidIv
     | State.Random_iv, Random -> ()
-    | _ -> assert false
+    | _ -> fail InvalidCipherState
 
 let conv_server_handshake maybe_state = function
   | Atom "AwaitClientHello" -> State.AwaitClientHello
   | List [ Atom "AwaitClientKeyExchange_DHE_RSA" ; hs ; dh ; log ] ->
+    guard (maybe_state <> None) (InvalidInitialState "AwaitClientKeyExchange_DHE_RSA") ;
     let session_data = session maybe_state in
     let sess = conv_hs_params session_data hs in
     State.AwaitClientKeyExchange_DHE_RSA (sess, State.dh_sent_of_sexp dh, State.hs_log_of_sexp log)
   | List [ Atom "AwaitClientKeyExchange_RSA" ; hs ; log ] ->
+    guard (maybe_state <> None) (InvalidInitialState "AwaitClientKeyExchange_RSA") ;
     let session_data = session maybe_state in
     let sess = conv_hs_params session_data hs in
     State.AwaitClientKeyExchange_RSA (sess, State.hs_log_of_sexp log)
   | List [ Atom "AwaitClientChangeCipherSpec" ; List ccc ; List scc ; ms ; log ] ->
+    guard (maybe_state <> None) (InvalidInitialState "AwaitClientChangeCipherSpec") ;
     let master_secret = Cstruct_s.t_of_sexp ms in
     let session_data = session maybe_state in
     let session = { session_data with State.master_secret = master_secret } in
@@ -141,9 +159,12 @@ let conv_server_handshake maybe_state = function
     cc_checker ccc cc ; cc_checker scc sc ;
     State.AwaitClientChangeCipherSpec (session, cc, sc, State.hs_log_of_sexp log)
   | List [ Atom "AwaitClientFinished" ; ms ; log ] ->
+    guard (maybe_state <> None) (InvalidInitialState "AwaitClientFinished") ;
     let session = session maybe_state in
     State.AwaitClientFinished (session, State.hs_log_of_sexp log)
-  | Atom "Established" -> State.Established
+  | Atom "Established" ->
+    guard (maybe_state <> None) (InvalidInitialState "Established") ;
+    State.Established
 
 let conv_machina maybe_state = function
   | List [ Atom "Server" ; xs ] -> State.Server (conv_server_handshake maybe_state xs)
@@ -164,15 +185,16 @@ let conv_config = function
 
 let conv_handshake maybe_state = function
   | List eles ->
+    let sessions = match maybe_state with None -> [] | Some x -> x.State.handshake.State.session in
     match
       List.fold_left (fun (session, ver, machina, config, hs_frag) ele ->
           match ele with
           | List [ Atom "version" ; x ] -> (session, Some (Core.tls_version_of_sexp x), machina, config, hs_frag)
-          | List [ Atom "reneg" ; x ] -> (* TODO: needs to be injected into session_data... *) (session, ver, machina, config, hs_frag)
+          | List [ Atom "reneg" ; x ] -> (session, ver, machina, config, hs_frag)
           | List [ Atom "machina" ; x ] -> (session, ver, Some (conv_machina maybe_state x), config, hs_frag)
           | List [ Atom "config" ; List cfgs ] -> (session, ver, machina, Some (Config.config_of_sexp (List (List.map conv_config cfgs))), hs_frag)
           | List [ Atom "hs_fragment" ; x ] -> (session, ver, machina, config, Some (Cstruct_s.t_of_sexp x)))
-        (Some [] (* TODO: fix me *), None, None, None, None) eles
+        (Some sessions, None, None, None, None) eles
     with
     | Some session, Some protocol_version, Some machina, Some config, Some hs_fragment ->
       State.{ session ; protocol_version ; machina ; config ; hs_fragment }
@@ -182,15 +204,15 @@ let conv_handshake maybe_state = function
 let conv_cst mac old cst =
   match old, cst with
   | State.Stream x, Stream ->
-    assert (Nocrypto.Uncommon.Cs.equal x.State.hmac_secret mac) ;
+    guard (Nocrypto.Uncommon.Cs.equal x.State.hmac_secret mac) InvalidHmacKey ;
     State.Stream x
   | State.CBC c, Random ->
-    assert (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) ;
-    assert (c.State.iv_mode = State.Random_iv) ;
+    guard (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) InvalidHmacKey ;
+    guard (c.State.iv_mode = State.Random_iv) InvalidCipherState ;
     old
   | State.CBC c, Iv iv ->
-    assert (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) ;
-    assert (not (c.State.iv_mode = State.Random_iv)) ;
+    guard (Nocrypto.Uncommon.Cs.equal c.State.hmac_secret mac) InvalidHmacKey ;
+    guard (not (c.State.iv_mode = State.Random_iv)) InvalidIv ;
     (State.CBC { c with State.iv_mode = State.Iv iv })
 
 let conv_cc last proj sexp =
