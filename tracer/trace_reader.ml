@@ -67,20 +67,24 @@ let run dir file =
     and failures = Hashtbl.create 100
     in
     let suc (ts, alert, traces) name =
+      let value = List.length traces in
       match alert with
       | None ->
-        if Hashtbl.mem successes name then
-          let ele = Hashtbl.find successes name in
-          Printf.printf "replaced\n%!" ;
-          Hashtbl.replace successes name (succ ele)
+        if value < 10 then
+          Printf.printf "%d elements - broken non-alert trace at %s ?\n" value name
+        else if Hashtbl.mem successes value then
+          let ele = Hashtbl.find successes value in
+          Hashtbl.replace successes value (succ ele)
         else
-          Hashtbl.add successes name 1
+          Hashtbl.add successes value 1
       | Some x ->
-        if Hashtbl.mem alerts x then
-          let ele = Hashtbl.find alerts x in
-          Hashtbl.replace alerts x (name :: ele)
+        if value < 3 then
+          Printf.printf "%d elements - broken alert trace at %s ?\n" value name
+        else if Hashtbl.mem alerts value then
+          let ele = Hashtbl.find alerts value in
+          Hashtbl.replace alerts value (succ ele)
         else
-          Hashtbl.add alerts x [name]
+          Hashtbl.add alerts value 1
     and fails e name =
       if Hashtbl.mem failures e then
         let ele = Hashtbl.find failures e in
@@ -99,23 +103,29 @@ let run dir file =
        | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
       filen := try Some (Unix.readdir dirent) with End_of_file -> None
     done ;
-    Printf.printf "statistics: %d success size, %d failure size %d alert size\n"
-      (Hashtbl.length successes) (Hashtbl.length failures) (Hashtbl.length alerts);
-    Hashtbl.iter  (fun k v ->
+    let succ = ref 0
+    and alert = ref 0
+    in
+    Hashtbl.iter (fun k v ->
+        Printf.printf "success trace length %d count %d\n" k v ; succ := v + !succ)
+      successes ;
+    Hashtbl.iter (fun k v ->
+        Printf.printf "alert trace length %d count %d\n" k v ; alert := v + !alert)
+      alerts ;
+    Printf.printf "%d success, %d alert traces\n" !succ !alert
+(*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
-      failures ;
-    Hashtbl.iter  (fun k v ->
-        Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
-      alerts
+      failures *)
   | None, Some file ->
-    try (match handle file with
-        | Some (ts, Some alert, traces) ->
-          Printf.printf "trace from %s, alert %s (%d traces)\n" ts (Sexplib.Sexp.to_string_hum alert) (List.length traces)
-        | Some (ts, None, traces) ->
-          Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces)
-        | None -> Printf.printf "couldn't load any traces..." )
-    with
-    | Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e))
+    (try (match handle file with
+         | Some (ts, Some alert, traces) ->
+           Printf.printf "trace from %s, alert %s (%d traces)\n" ts (Sexplib.Sexp.to_string_hum alert) (List.length traces)
+         | Some (ts, None, traces) ->
+           Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces)
+         | None -> Printf.printf "couldn't load any traces..." )
+     with
+       Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e)))
+  | _ -> assert false
 
 
 let trace_dir = ref None
@@ -145,66 +155,19 @@ tls3 - statistics: 6949 success size, 1 failure size
 reason (InvalidInitialState Established) count 19
 tls4 - statistics: 12442 success size, 1 failure size
 reason (InvalidInitialState Established) count 68
-tls4-new - statistics: 1142 success size, 1 failure size
-reason (InvalidInitialState Established) count 1
 
-tls0 has an offending trace (which doesn't parse b4427fd723e11a0f)
+tls0 has one offending trace (which doesn't parse b4427fd723e11a0f)
 ---->
-35274 traces read successfully!
+34132 traces read successfully!
 
 
-results of traces
+cleaned up (with alert trace size at least 3 items, without alert 10 items):
+tls0  (6290) - 3138 success, 1010 alert traces
+tls1  (4319) - 1913 success,  934 alert traces
+tls2  (4132) - 1882 success,  802 alert traces
+tls3  (6949) - 4468 success,  874 alert traces
+tls4 (12442) - 8694 success, 1553 alert traces
+----------------------------------------------
+      34132   20095          5137
 
-tls0:
-statistics: 4847 success size, 2 failure size 5 alert size
-reason InvalidHmacKey count 1
-reason (InvalidInitialState Established) count 178
-reason (FATAL RECORD_OVERFLOW) count 1
-reason (FATAL HANDSHAKE_FAILURE) count 826
-reason (FATAL PROTOCOL_VERSION) count 553
-reason (FATAL BAD_RECORD_MAC) count 4
-reason (FATAL UNEXPECTED_MESSAGE) count 59
-
-tls1:
-statistics: 3100 success size, 1 failure size 5 alert size
-reason (InvalidInitialState Established) count 6
-reason (FATAL RECORD_OVERFLOW) count 1
-reason (FATAL HANDSHAKE_FAILURE) count 864
-reason (FATAL PROTOCOL_VERSION) count 301
-reason (FATAL BAD_RECORD_MAC) count 3
-reason (FATAL UNEXPECTED_MESSAGE) count 50
-
-tls2:
-statistics: 3054 success size, 1 failure size 4 alert size
-reason (InvalidInitialState Established) count 9
-reason (FATAL HANDSHAKE_FAILURE) count 741
-reason (FATAL PROTOCOL_VERSION) count 283
-reason (FATAL BAD_RECORD_MAC) count 5
-reason (FATAL UNEXPECTED_MESSAGE) count 49
-
-tls3:
-statistics: 5876 success size, 1 failure size 5 alert size
-reason (InvalidInitialState Established) count 19
-reason (FATAL RECORD_OVERFLOW) count 1
-reason (FATAL HANDSHAKE_FAILURE) count 805
-reason (FATAL PROTOCOL_VERSION) count 215
-reason (FATAL BAD_RECORD_MAC) count 8
-reason (FATAL UNEXPECTED_MESSAGE) count 44
-
-tls4:
-statistics: 10564 success size, 1 failure size 5 alert size
-reason (InvalidInitialState Established) count 68
-reason (FATAL RECORD_OVERFLOW) count 1
-reason (FATAL HANDSHAKE_FAILURE) count 1142
-reason (FATAL PROTOCOL_VERSION) count 419
-reason (FATAL BAD_RECORD_MAC) count 20
-reason (FATAL UNEXPECTED_MESSAGE) count 296
-
-tls4-new:
-statistics: 634 success size, 1 failure size 4 alert size
-reason (InvalidInitialState Established) count 1
-reason (FATAL HANDSHAKE_FAILURE) count 415
-reason (FATAL PROTOCOL_VERSION) count 77
-reason (FATAL BAD_RECORD_MAC) count 4
-reason (FATAL UNEXPECTED_MESSAGE) count 12
 *)
