@@ -1,5 +1,7 @@
 open Read_trace
 
+open Tls
+
 let to_re str =
   (Str.regexp_string str, String.length str)
 
@@ -42,6 +44,79 @@ let analyse_and_print traces =
   let d = List.map result_to_string res in
   () (* Printf.printf "result:\n  %s\n" (String.concat "\n  " d) *)
 
+let analyse_trace name trace =
+  let rec goin p = function
+    | [] -> None
+    | x::_ when p x -> Some x
+    | _::xs -> goin p xs
+  in
+  let rec goout p = function
+    | [] -> None
+    | x::_ when p x -> Some x
+    | _::xs -> goout p xs
+  in
+  let client_hello =
+    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
+    let ch = goin (function `RecordIn (tls_hdr, d) when tls_hdr.Core.content_type = Packet.HANDSHAKE && tst d -> true | _ -> false) trace in
+    match ch with
+    | Some (`RecordIn (_, ch)) -> Reader.parse_handshake ch
+    | _ -> assert false
+  in
+  let server_hello =
+    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
+    let sh = goout (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
+    match sh with
+    | Some (`RecordOut (_, sh)) ->
+      let buflen = Reader.parse_handshake_length sh in
+      let data = Cstruct.sub sh 0 (buflen + 4) in
+      Reader.parse_handshake data
+    | _ -> assert false
+  in
+  match client_hello, server_hello with
+  | Reader.Or_error.Ok (Core.ClientHello ch), Reader.Or_error.Ok Core.ServerHello sh ->
+    Some ((sh.Core.version, ch.Core.version), ch.Core.ciphersuites, sh.Core.ciphersuites)
+  | _ -> Printf.printf "problem while parsing sth in %s\n" name ; None
+
+let analyse_success hashtbl =
+  (* key is name, value is (timestamp, trace) *)
+  let versions, client_cs, server_cs =
+    Hashtbl.fold (fun name (_, trace) (vacc, cacc, scacc) ->
+        match analyse_trace name trace with
+        | Some (vs, ccs, scs) -> (vs :: vacc, ccs :: cacc, scs :: scacc)
+        | None -> (vacc, cacc, scacc))
+      hashtbl ([], [], [])
+  in
+  let s_versions = Hashtbl.create 9 in
+  List.iter (fun x ->
+      if Hashtbl.mem s_versions x then
+        let ele = Hashtbl.find s_versions x in
+        Hashtbl.replace s_versions x (succ ele)
+      else
+        Hashtbl.add s_versions x 1) versions ;
+  Hashtbl.iter (fun (s, c) v ->
+      Printf.printf "%s used (%s proposed) %d times\n" (Printer.tls_version_to_string s) (Printer.tls_any_version_to_string c) v)
+    s_versions ;
+  let s_ciphers = Hashtbl.create 9 in
+  List.iter (fun x ->
+      if Hashtbl.mem s_ciphers x then
+        let ele = Hashtbl.find s_ciphers x in
+        Hashtbl.replace s_ciphers x (succ ele)
+      else
+        Hashtbl.add s_ciphers x 1) server_cs ;
+  Hashtbl.iter (fun c v ->
+      Printf.printf "%s used %d times\n" (Ciphersuite.ciphersuite_to_string c) v)
+    s_ciphers
+(*  let c_ciphers = Hashtbl.create 9 in
+  List.iter (fun x ->
+      if Hashtbl.mem c_ciphers x then
+        let ele = Hashtbl.find c_ciphers x in
+        Hashtbl.replace c_ciphers x (succ ele)
+      else
+        Hashtbl.add c_ciphers x 1) client_cs ;
+  Hashtbl.iter (fun c v ->
+      Printf.printf "%d clients proposed %s\n" v (String.concat ", " (List.map Packet.any_ciphersuite_to_string c)))
+    c_ciphers *)
+
 let handle file =
   match load file with
   | None -> Printf.printf "error loading %s\n" file ; None
@@ -67,24 +142,27 @@ let run dir file =
     and failures = Hashtbl.create 100
     in
     let suc (ts, alert, traces) name =
-      let value = List.length traces in
+      let len = List.length traces in
       match alert with
       | None ->
-        if value < 10 then
-          Printf.printf "%d elements - broken non-alert trace at %s ?\n" value name
-        else if Hashtbl.mem successes value then
-          let ele = Hashtbl.find successes value in
-          Hashtbl.replace successes value (succ ele)
+        if len < 10 then
+          (* Printf.printf "%d elements - broken non-alert trace at %s ?\n" len name *)
+          ()
+        else if Hashtbl.mem successes name then
+          (* let ele = Hashtbl.find successes name in
+             Hashtbl.replace successes name ele *)
+          assert false
         else
-          Hashtbl.add successes value 1
+          Hashtbl.add successes name (ts, traces)
       | Some x ->
-        if value < 3 then
-          Printf.printf "%d elements - broken alert trace at %s ?\n" value name
-        else if Hashtbl.mem alerts value then
-          let ele = Hashtbl.find alerts value in
-          Hashtbl.replace alerts value (succ ele)
+        if len < 3 then
+          (* Printf.printf "%d elements - broken alert trace at %s ?\n" len name *)
+          ()
+        else if Hashtbl.mem alerts x then
+          let ele = Hashtbl.find alerts x in
+          Hashtbl.replace alerts x ((ts, name) :: ele)
         else
-          Hashtbl.add alerts value 1
+          Hashtbl.add alerts x [(ts, name)]
     and fails e name =
       if Hashtbl.mem failures e then
         let ele = Hashtbl.find failures e in
@@ -103,16 +181,14 @@ let run dir file =
        | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
       filen := try Some (Unix.readdir dirent) with End_of_file -> None
     done ;
-    let succ = ref 0
-    and alert = ref 0
-    in
+    Printf.printf "success size %d\n" (Hashtbl.length successes) ;
+(*    Hashtbl.iter (fun k (ts, trace) ->
+        Printf.printf "success trace length %d count %d\n" k v)
+      successes ; *)
     Hashtbl.iter (fun k v ->
-        Printf.printf "success trace length %d count %d\n" k v ; succ := v + !succ)
-      successes ;
-    Hashtbl.iter (fun k v ->
-        Printf.printf "alert trace length %d count %d\n" k v ; alert := v + !alert)
+        Printf.printf "alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       alerts ;
-    Printf.printf "%d success, %d alert traces\n" !succ !alert
+    analyse_success successes
 (*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
       failures *)
@@ -121,7 +197,10 @@ let run dir file =
          | Some (ts, Some alert, traces) ->
            Printf.printf "trace from %s, alert %s (%d traces)\n" ts (Sexplib.Sexp.to_string_hum alert) (List.length traces)
          | Some (ts, None, traces) ->
-           Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces)
+           Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces) ;
+           let hash = Hashtbl.create 1 in
+           Hashtbl.add hash file (ts, traces) ;
+           analyse_success hash
          | None -> Printf.printf "couldn't load any traces..." )
      with
        Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e)))
@@ -142,32 +221,3 @@ let arglist = [
 let () =
   Arg.parse arglist (fun x -> rest := x :: !rest) usage ;
   run !trace_dir !trace_file
-
-(* results (for reading traces):
-tls0 - statistics: 6290 success size, 2 failure size
-reason InvalidHmacKey count 1
-reason (InvalidInitialState Established) count 178
-tls1 - statistics: 4319 success size, 1 failure size
-reason (InvalidInitialState Established) count 6
-tls2 - statistics: 4132 success size, 1 failure size
-reason (InvalidInitialState Established) count 9
-tls3 - statistics: 6949 success size, 1 failure size
-reason (InvalidInitialState Established) count 19
-tls4 - statistics: 12442 success size, 1 failure size
-reason (InvalidInitialState Established) count 68
-
-tls0 has one offending trace (which doesn't parse b4427fd723e11a0f)
----->
-34132 traces read successfully!
-
-
-cleaned up (with alert trace size at least 3 items, without alert 10 items):
-tls0  (6290) - 3138 success, 1010 alert traces
-tls1  (4319) - 1913 success,  934 alert traces
-tls2  (4132) - 1882 success,  802 alert traces
-tls3  (6949) - 4468 success,  874 alert traces
-tls4 (12442) - 8694 success, 1553 alert traces
-----------------------------------------------
-      34132   20095          5137
-
-*)
