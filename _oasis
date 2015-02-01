@@ -145,7 +145,14 @@ Executable "trace_reader"
   Install         : false
   CompiledObject  : native
   MainIs          : trace_reader.ml
-  BuildDepends    : sexplib, tls
+  BuildDepends    : sexplib, tls, tracing
+
+Executable "trace_checker"
+  Path            : tracer
+  Install         : false
+  CompiledObject  : native
+  MainIs          : trace_checker.ml
+  BuildDepends    : sexplib, tls, tracing, cstruct.unix
 
 Document api
   Title: Documentation and API reference

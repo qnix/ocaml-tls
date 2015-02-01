@@ -15,7 +15,7 @@ type own_cert = [
 ]
 
 (** configuration parameters *)
-type config = private {
+type config = {
   ciphers           : Ciphersuite.ciphersuite list ; (** ordered list (regarding preference) of supported cipher suites *)
   protocol_versions : tls_version * tls_version ; (** supported protocol versions (min, max) *)
   hashes            : Hash.hash list ; (** ordered list of supported hash algorithms (regarding preference) *)

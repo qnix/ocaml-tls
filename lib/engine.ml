@@ -330,14 +330,14 @@ let handle_change_cipher_spec = function
   | Client cs -> Handshake_client.handle_change_cipher_spec cs
   | Server ss -> Handshake_server.handle_change_cipher_spec ss
 
-and handle_handshake = function
+and handle_handshake valid = function
   | Client cs -> Handshake_client.handle_handshake cs
-  | Server ss -> Handshake_server.handle_handshake ss
+  | Server ss -> Handshake_server.handle_handshake valid ss
 
 let non_empty cs =
   if Cstruct.len cs = 0 then None else Some cs
 
-let handle_packet hs buf = function
+let handle_packet hs buf valid = function
 (* RFC 5246 -- 6.2.1.:
    Implementations MUST NOT send zero-length fragments of Handshake,
    Alert, or ChangeCipherSpec content types.  Zero-length fragments of
@@ -364,7 +364,7 @@ let handle_packet hs buf = function
      separate_handshakes (hs.hs_fragment <+> buf)
      >>= fun (hss, hs_fragment) ->
        foldM (fun (hs, items) raw ->
-         handle_handshake hs.machina hs raw
+         handle_handshake valid hs.machina hs raw
          >|= fun (hs', items') -> (hs', items @ items'))
        (hs, []) hss
      >|= fun (hs, items) ->
@@ -372,9 +372,15 @@ let handle_packet hs buf = function
 
   | Packet.HEARTBEAT -> fail (`Fatal `NoHeartbeat)
 
+type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
 
 (* the main thingy *)
-let handle_raw_record state (hdr, buf as record : raw_record) =
+let handle_raw_record ?valid state (hdr, buf as record : raw_record) =
+
+  let valid = match valid with
+    | None -> empty_valid ()
+    | Some x -> x
+  in
 
   Tracing.sexpf ~tag:"record-in" ~f:sexp_of_raw_record record ;
 
@@ -388,7 +394,7 @@ let handle_raw_record state (hdr, buf as record : raw_record) =
   >>= fun () ->
   decrypt version state.decryptor hdr.content_type buf
   >>= fun (dec_st, dec) ->
-  handle_packet state.handshake dec hdr.content_type
+  handle_packet state.handshake dec valid hdr.content_type
   >|= fun (handshake, items, data, dec_cmd, err) ->
   let (encryptor, encs) =
     List.fold_left (fun (st, es) -> function

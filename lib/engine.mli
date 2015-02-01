@@ -62,7 +62,7 @@ val alert_of_failure : failure -> Packet.alert_type
 val string_of_failure : failure -> string
 
 (** some abstract type a client gets *)
-type state
+type state = State.state
 
 (** return type of handle_tls *)
 type ret = [
@@ -77,6 +77,11 @@ type ret = [
 
 (** [handle_tls tls in] is [ret], depending on incoming [tls] state and cstruct, return appropriate [ret] *)
 val handle_tls : state -> Cstruct.t -> ret
+
+type raw_record = Core.tls_hdr * Cstruct.t
+type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
+val handle_raw_record : ?valid:State.validate -> state -> raw_record -> (state * (Packet.content_type * Cstruct.t) list * Cstruct.t option * err) Core.t
+
 
 (** [can_handle_appdata tls] is a predicate which indicates when the connection has already completed a handshake *)
 val can_handle_appdata    : state -> bool

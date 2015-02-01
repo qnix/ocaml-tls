@@ -114,7 +114,7 @@ let ciphersuite_to_any_ciphersuite = function
   | `TLS_DHE_RSA_WITH_AES_128_CCM        -> Packet.TLS_DHE_RSA_WITH_AES_128_CCM
   | `TLS_DHE_RSA_WITH_AES_256_CCM        -> Packet.TLS_DHE_RSA_WITH_AES_256_CCM
 
-let ciphersuite_to_string x= Packet.any_ciphersuite_to_string (ciphersuite_to_any_ciphersuite x)
+let ciphersuite_to_string x = Packet.any_ciphersuite_to_string (ciphersuite_to_any_ciphersuite x)
 
 (** [get_kex_privprot ciphersuite] is [(kex, privacy_protection)] where it dissects the [ciphersuite] into a pair containing the key exchange method [kex], and its [privacy_protection] *)
 let get_kex_privprot = function
