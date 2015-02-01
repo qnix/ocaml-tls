@@ -29,6 +29,7 @@ type error =
   | InvalidCipherState
   | InvalidVersion
   | InvalidIv
+  | EmptyDir
 with sexp
 
 exception Trace_error of error
@@ -347,6 +348,11 @@ let eval_and_rev = function
   | `AlertOut alert::_ as xs -> (Some (Core.sexp_of_tls_alert alert), List.rev xs)
   | xs -> (None, List.rev xs)
 
+let safe_ts t =
+  match timestamp t with
+  | Some x -> timestamp_to_string x
+  | None -> ""
+
 let load filename =
   match (Unix.stat filename).Unix.st_kind with
   | Unix.S_DIR ->
@@ -361,11 +367,32 @@ let load filename =
       file := try Some (Unix.readdir dir) with End_of_file -> None
     done ;
     (match List.map snd (List.sort (fun (a, _) (a', _) -> compare a a') !acc) with
-     | [] -> None
+     | [] -> fail EmptyDir
      | x :: xs ->
-       Some (timestamp x,
-             eval_and_rev
-               (List.fold_left (fun acc f -> load_single_file acc (Filename.concat filename f))
-                  [] (x :: xs))) )
+       (safe_ts x,
+        eval_and_rev
+          (List.fold_left (fun acc f ->
+               load_single_file acc (Filename.concat filename f))
+              [] (x :: xs))) )
   | Unix.S_REG ->
-    Some (timestamp (Filename.basename filename), eval_and_rev (load_single_file [] filename))
+    (safe_ts (Filename.basename filename),
+     eval_and_rev (load_single_file [] filename))
+
+let load_dir dir =
+  let dirent = Unix.opendir dir in
+  Unix.readdir dirent ; Unix.readdir dirent ; (* getting rid of . and .. *)
+  let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in
+  let suc = ref []
+  and fai = ref []
+  in
+  while not (!filen = None) do
+    let Some filename = !filen in
+    (try
+       let trace = load (Filename.concat dir filename) in
+       suc := (filename, trace) :: !suc
+     with
+     | Trace_error e -> fai := (filename, e) :: !fai
+     | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
+    filen := try Some (Unix.readdir dirent) with End_of_file -> None
+  done ;
+  (!suc, !fai)

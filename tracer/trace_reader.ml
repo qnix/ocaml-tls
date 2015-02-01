@@ -117,31 +117,14 @@ let analyse_success hashtbl =
       Printf.printf "%d clients proposed %s\n" v (String.concat ", " (List.map Packet.any_ciphersuite_to_string c)))
     c_ciphers *)
 
-let handle file =
-  match load file with
-  | None -> Printf.printf "error loading %s\n" file ; None
-  | Some (Some time, (alert, traces)) ->
-    let timestring = timestamp_to_string time in
-    (* Printf.printf "trace from %s with %d elements\n" timestring (List.length traces) ; *)
-    (* analyse_and_print traces *)
-    Some (timestring, alert, traces)
-  | Some (None, (alert, traces)) ->
-    (* Printf.printf "trace (no time) with %d elements\n" (List.length traces) ; *)
-    (* analyse_and_print traces *)
-    Some ("", alert, traces)
-
-
 let run dir file =
   match dir, file with
-  | Some file, _ ->
-    let dirent = Unix.opendir file in
-    Unix.readdir dirent ; Unix.readdir dirent ;
-    let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in
+  | Some dir, _ ->
     let successes = Hashtbl.create 100
     and alerts = Hashtbl.create 100
     and failures = Hashtbl.create 100
     in
-    let suc (ts, alert, traces) name =
+    let suc (name, (ts, (alert, traces))) =
       let len = List.length traces in
       match alert with
       | None ->
@@ -163,24 +146,18 @@ let run dir file =
           Hashtbl.replace alerts x ((ts, name) :: ele)
         else
           Hashtbl.add alerts x [(ts, name)]
-    and fails e name =
+    and fails (name, e) =
       if Hashtbl.mem failures e then
         let ele = Hashtbl.find failures e in
         Hashtbl.replace failures e (name :: ele)
       else
         Hashtbl.add failures e [name]
     in
-    while not (!filen = None) do
-      let Some filename = !filen in
-      (try
-         match handle (Filename.concat file filename) with
-         | Some x -> suc x filename
-         | None -> ()
-       with
-       | Trace_error e -> fails e filename
-       | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
-      filen := try Some (Unix.readdir dirent) with End_of_file -> None
-    done ;
+
+    let success, fail = load_dir dir in
+    List.iter suc success ;
+    List.iter fails fail ;
+
     Printf.printf "success size %d\n" (Hashtbl.length successes) ;
 (*    Hashtbl.iter (fun k (ts, trace) ->
         Printf.printf "success trace length %d count %d\n" k v)
@@ -192,16 +169,18 @@ let run dir file =
 (*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
       failures *)
+
   | None, Some file ->
-    (try (match handle file with
-         | Some (ts, Some alert, traces) ->
-           Printf.printf "trace from %s, alert %s (%d traces)\n" ts (Sexplib.Sexp.to_string_hum alert) (List.length traces)
-         | Some (ts, None, traces) ->
-           Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces) ;
-           let hash = Hashtbl.create 1 in
-           Hashtbl.add hash file (ts, traces) ;
-           analyse_success hash
-         | None -> Printf.printf "couldn't load any traces..." )
+    (try (let ts, (alert, traces) = load file in
+          match alert with
+          | Some alert ->
+            Printf.printf "trace from %s, alert %s (%d traces)\n"
+              ts (Sexplib.Sexp.to_string_hum alert) (List.length traces)
+          | None ->
+            Printf.printf "trace from %s, loaded %d traces\n" ts (List.length traces) ;
+            let hash = Hashtbl.create 1 in
+            Hashtbl.add hash file (ts, traces) ;
+            analyse_success hash)
      with
        Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e)))
   | _ -> assert false
