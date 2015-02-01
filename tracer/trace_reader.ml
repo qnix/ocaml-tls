@@ -45,26 +45,21 @@ let analyse_and_print traces =
   () (* Printf.printf "result:\n  %s\n" (String.concat "\n  " d) *)
 
 let analyse_trace name trace =
-  let rec goin p = function
+  let rec go p = function
     | [] -> None
     | x::_ when p x -> Some x
-    | _::xs -> goin p xs
-  in
-  let rec goout p = function
-    | [] -> None
-    | x::_ when p x -> Some x
-    | _::xs -> goout p xs
+    | _::xs -> go p xs
   in
   let client_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
-    let ch = goin (function `RecordIn (tls_hdr, d) when tls_hdr.Core.content_type = Packet.HANDSHAKE && tst d -> true | _ -> false) trace in
+    let ch = go (function `RecordIn (tls_hdr, d) when tls_hdr.Core.content_type = Packet.HANDSHAKE && tst d -> true | _ -> false) trace in
     match ch with
     | Some (`RecordIn (_, ch)) -> Reader.parse_handshake ch
     | _ -> assert false
   in
   let server_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
-    let sh = goout (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
+    let sh = go (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
     match sh with
     | Some (`RecordOut (_, sh)) ->
       let buflen = Reader.parse_handshake_length sh in
