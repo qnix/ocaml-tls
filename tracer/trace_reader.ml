@@ -35,15 +35,16 @@ let rec analyse acc = function
   | _::xs -> analyse acc xs
   | [] -> List.rev acc
 
+let rec find_trace (p : trace -> bool) (xs : trace list) =
+  match xs with
+  | [] -> None
+  | x::_ when p x -> Some x
+  | _::xs -> find_trace p xs
+
 let analyse_trace name trace =
-  let rec go p = function
-    | [] -> None
-    | x::_ when p x -> Some x
-    | _::xs -> go p xs
-  in
   let server_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
-    let sh = go (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
+    let sh = find_trace (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
     match sh with
     | Some (`RecordOut (_, sh)) ->
       let buflen = Reader.parse_handshake_length sh in
@@ -130,7 +131,8 @@ let analyse_alerts hashtbl =
       | Core.Supported v -> true
       | _ -> false) name_versions
   in
-  Printf.printf "%d supported versions (other failure)\n" (List.length supported)
+  let sup_len = unique [] (List.map List.length (List.map (fun ((_, _, t), _) -> t) supported)) in
+  Printf.printf "%d supported versions (other failure) %s\n" (List.length supported) (String.concat ", " (List.map string_of_int sup_len))
 
 let run dir file =
   match dir, file with
@@ -177,9 +179,9 @@ let run dir file =
             Hashtbl.add early_alerts x [(ts, name)]
         else if Hashtbl.mem alerts x then
           let ele = Hashtbl.find alerts x in
-          Hashtbl.replace alerts x ((ts, name) :: ele)
+          Hashtbl.replace alerts x ((ts, name, traces) :: ele)
         else
-          Hashtbl.add alerts x [(ts, name)]
+          Hashtbl.add alerts x [(ts, name, traces)]
     and fails (name, e) =
       if Hashtbl.mem failures e then
         let ele = Hashtbl.find failures e in
@@ -205,7 +207,8 @@ let run dir file =
     Hashtbl.iter (fun k v ->
         Printf.printf "early alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       early_alerts ;
-    analyse_success successes
+    analyse_alerts alerts
+    (*    analyse_success successes *)
 (*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
       failures *)
