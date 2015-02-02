@@ -96,7 +96,7 @@ let analyse_success hashtbl =
 let analyse_protocol_version trace =
   let client_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
-    let ch = find_trace (function `RecordIn (hdr, data) -> hdr.content_type = Packet.HANDSHAKE && tst data | _ -> false) trace in
+    let ch = find_trace (function `RecordIn (hdr, data) -> hdr.Core.content_type = Packet.HANDSHAKE && tst data | _ -> false) trace in
     match ch with
     | Some (`RecordIn (_, ch)) -> Reader.parse_handshake ch
     | _ -> assert false
@@ -132,7 +132,58 @@ let analyse_alerts hashtbl =
       | _ -> false) name_versions
   in
   let sup_len = unique [] (List.map List.length (List.map (fun ((_, _, t), _) -> t) supported)) in
-  Printf.printf "%d supported versions (other failure) %s\n" (List.length supported) (String.concat ", " (List.map string_of_int sup_len))
+  Printf.printf "%d supported versions (other failure) %s\n" (List.length supported) (String.concat ", " (List.map string_of_int sup_len)) ;
+
+  let unexpected =
+    Hashtbl.find hashtbl (Core.sexp_of_tls_alert (Packet.FATAL, Packet.UNEXPECTED_MESSAGE))
+  in
+  let unexpected_traces = List.map (fun (_, _, x) -> x) unexpected in
+  let find_hs_state t =
+    match
+      find_trace (function `State _ -> true | `StateIn _ -> true | `StateOut _ -> true | _ -> false) (List.rev t)
+    with
+    | Some (`State x) | Some (`StateIn x) | Some (`StateOut x) ->
+      (match x.State.handshake.State.machina with
+       | State.Server State.AwaitClientHello -> "await client hello"
+       | State.Server State.AwaitClientHelloRenegotiate -> "await client hello renegotiate"
+       | State.Server (State.AwaitClientCertificate_RSA _) -> "await client certificate RSA"
+       | State.Server (State.AwaitClientCertificate_DHE_RSA _) -> "await client certificate DHE_RSA"
+       | State.Server (State.AwaitClientKeyExchange_RSA _) -> "await client key exchange RSA"
+       | State.Server (State.AwaitClientKeyExchange_DHE_RSA _) -> "await client key exchange DHE_RSA"
+       | State.Server (State.AwaitClientCertificateVerify _) -> "await client certificate verify"
+       | State.Server (State.AwaitClientChangeCipherSpec _) -> "await client change cipher spec"
+       | State.Server (State.AwaitClientFinished _) -> "await client finished"
+       | State.Server State.Established -> "established"
+       | _ -> assert false )
+    | _ -> assert false
+  in
+  let find_record_in t =
+    match
+      find_trace (function `RecordIn _ -> true | _ -> false) (List.rev t)
+    with
+    | Some (`RecordIn (hdr, data)) ->
+      (match hdr.Core.content_type with
+       | Packet.CHANGE_CIPHER_SPEC -> "CCS"
+       | Packet.ALERT ->
+         ( match Reader.parse_alert data with
+           | Reader.Or_error.Ok (lvl, typ) ->
+             (Packet.alert_level_to_string lvl) ^ ", " ^ (Packet.alert_type_to_string typ)
+           | _ -> Printf.sprintf "%02x %02x" (Cstruct.get_uint8 data 0) (Cstruct.get_uint8 data 1) )
+       | Packet.HANDSHAKE ->
+         ( match Reader.parse_handshake data with
+           | Reader.Or_error.Ok hs -> Printer.handshake_to_string hs
+           | _ -> Printf.sprintf "unknown hs %02x" (Cstruct.get_uint8 data 0) )
+       | _ -> "unknown content" )
+    | _ -> assert false
+  in
+  let last_state = List.map find_hs_state unexpected_traces in
+  let last_record = List.map find_record_in unexpected_traces in
+  let lsu = unique [] (List.combine last_state last_record) in
+  Printf.printf "%d unexpected\n%s\n"
+    (List.length last_state)
+    (String.concat "\n" (List.map (fun (a, b) ->
+         "state: " ^ a ^ ", content type: " ^ b)
+         lsu))
 
 let run dir file =
   match dir, file with
