@@ -271,6 +271,7 @@ type trace = [
   | `RecordOut of Packet.content_type * Cstruct_s.t
   | `ApplicationDataIn of Cstruct_s.t
   | `AlertOut of Core.tls_alert
+  | `AlertIn of Core.tls_alert
 ]
 
 let process_sexp acc x =
@@ -323,6 +324,8 @@ let process_sexp acc x =
     `State st :: acc
   | List [ Atom "alert-out" ; alert ] ->
     `AlertOut (Core.tls_alert_of_sexp alert) :: acc
+  | List [ Atom "alert-in" ; alert ] ->
+    `AlertIn (Core.tls_alert_of_sexp alert) :: acc
   | List [ Atom x ; xs ] -> (* Printf.printf "ignoring %s\n" x ; *) acc
   | xs -> Printf.printf "unexpected %s\n" (to_string_hum xs) ; acc
 

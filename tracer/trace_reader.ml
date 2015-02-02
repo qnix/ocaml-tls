@@ -91,16 +91,72 @@ let analyse_success hashtbl =
   in
   Printf.printf "%d user-agents:\n%s\n" (List.length uas) (String.concat "\n" uas)
 
+
+let analyse_protocol_version trace =
+  let client_hello =
+    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
+    let ch = find_trace (function `RecordIn (hdr, data) -> hdr.content_type = Packet.HANDSHAKE && tst data | _ -> false) trace in
+    match ch with
+    | Some (`RecordIn (_, ch)) -> Reader.parse_handshake ch
+    | _ -> assert false
+  in
+  match client_hello with
+  | Reader.Or_error.Ok Core.ClientHello ch -> ch.Core.version
+  | _ -> assert false
+
+
+let rec unique acc = function
+  | [] -> acc
+  | x::xs when List.mem x acc -> unique acc xs
+  | x::xs -> unique (x :: acc) xs
+
+let analyse_alerts hashtbl =
+  (* err -> (timestamp, name, traces) *)
+  let version_fails =
+    Hashtbl.find hashtbl (Core.sexp_of_tls_alert (Packet.FATAL, Packet.PROTOCOL_VERSION))
+  in
+  let versions = List.map analyse_protocol_version (List.map (fun (_, _, x) -> x) version_fails) in
+  let name_versions = List.combine version_fails versions in
+  let unsupported = List.filter (fun (_, v) -> match v with
+      | Core.SSL_3 -> true
+      | Core.TLS_1_X _ -> true
+      | _ -> false) name_versions
+  in
+  let single = unique [] (List.map snd unsupported) in
+  Printf.printf "%d unsupported versions: %s\n"
+    (List.length unsupported)
+    (String.concat ", " (List.map Printer.tls_any_version_to_string single)) ;
+  let supported = List.filter (fun (_, v) -> match v with
+      | Core.Supported v -> true
+      | _ -> false) name_versions
+  in
+  Printf.printf "%d supported versions (other failure)\n" (List.length supported)
+
 let run dir file =
   match dir, file with
   | Some dir, _ ->
     let successes = Hashtbl.create 100
     and alerts = Hashtbl.create 100
     and early_alerts = Hashtbl.create 100
+    and alert_in = Hashtbl.create 100
     and failures = Hashtbl.create 100
     in
-    let suc (name, (ts, (alert, traces))) =
+    let suc (name, (ts, (alert, (traces : trace list)))) =
       let len = List.length traces in
+      if List.exists (function `AlertIn x -> true | _ -> false) traces then
+        let alert = List.filter (function `AlertIn x -> true | _ -> false) traces in
+        assert (List.length alert = 1) ;
+        let x = match alert with
+          | [`AlertIn x] -> x
+          | _ -> assert false
+        in
+        let x = Core.sexp_of_tls_alert x in
+        if Hashtbl.mem alert_in x then
+          let ele = Hashtbl.find alert_in x in
+          Hashtbl.replace alert_in x ((ts, name) :: ele)
+        else
+          Hashtbl.add alert_in x [(ts, name)]
+      else
       match alert with
       | None ->
         if len < 10 then
@@ -140,6 +196,9 @@ let run dir file =
 (*    Hashtbl.iter (fun k (ts, trace) ->
         Printf.printf "success trace length %d count %d\n" k v)
       successes ; *)
+    Hashtbl.iter (fun k v ->
+        Printf.printf "alert in %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
+      alert_in ;
     Hashtbl.iter (fun k v ->
         Printf.printf "alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       alerts ;
