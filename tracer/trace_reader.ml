@@ -17,45 +17,29 @@ let result_to_string = function
   | `UserAgent s -> "user-agent: " ^ s
   | `Referer r -> "referer: " ^ r
 
-let find_user_agent_referer buf =
+let find_user_agent buf =
   let str = Cstruct.to_string buf in
   let find_re (re, l) =
     try
       let idx = Str.search_forward re str 0 in
-      let start = succ (idx + l) in
+      let start = succ (succ (idx + l)) in
       let nl = try String.index_from str start '\r' with Not_found -> String.length str in
       Some (String.sub str start (nl - start))
     with
       _ -> None
   in
-  match find_re user_agent, find_re referer with
-  | Some x, Some y -> [`UserAgent x ; `Referer y]
-  | Some x, None -> [`UserAgent x]
-  | None, Some y -> [`Referer y]
-  | None, None -> []
+  find_re user_agent
 
 let rec analyse acc = function
-  | (`ApplicationDataIn s)::xs -> analyse ((find_user_agent_referer s) @ acc) xs
+  | (`ApplicationDataIn s)::xs -> analyse (s :: acc) xs
   | _::xs -> analyse acc xs
-  | [] -> acc
-
-let analyse_and_print traces =
-  let res = analyse [] traces in
-  let d = List.map result_to_string res in
-  () (* Printf.printf "result:\n  %s\n" (String.concat "\n  " d) *)
+  | [] -> List.rev acc
 
 let analyse_trace name trace =
   let rec go p = function
     | [] -> None
     | x::_ when p x -> Some x
     | _::xs -> go p xs
-  in
-  let client_hello =
-    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
-    let ch = go (function `RecordIn (tls_hdr, d) when tls_hdr.Core.content_type = Packet.HANDSHAKE && tst d -> true | _ -> false) trace in
-    match ch with
-    | Some (`RecordIn (_, ch)) -> Reader.parse_handshake ch
-    | _ -> assert false
   in
   let server_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
@@ -67,56 +51,52 @@ let analyse_trace name trace =
       Reader.parse_handshake data
     | _ -> assert false
   in
-  match client_hello, server_hello with
-  | Reader.Or_error.Ok (Core.ClientHello ch), Reader.Or_error.Ok Core.ServerHello sh ->
-    Some ((sh.Core.version, ch.Core.version), ch.Core.ciphersuites, sh.Core.ciphersuites)
+  let appdata = analyse [] trace in
+  let ua = find_user_agent (Nocrypto.Uncommon.Cs.concat appdata) in
+  match server_hello with
+  | Reader.Or_error.Ok Core.ServerHello sh ->
+    Some (sh.Core.version, sh.Core.ciphersuites, ua)
   | _ -> Printf.printf "problem while parsing sth in %s\n" name ; None
 
 let analyse_success hashtbl =
   (* key is name, value is (timestamp, trace) *)
-  let versions, client_cs, server_cs =
-    Hashtbl.fold (fun name (_, trace) (vacc, cacc, scacc) ->
+  let stats, uas =
+    Hashtbl.fold (fun name (_, trace) (s, ua) ->
         match analyse_trace name trace with
-        | Some (vs, ccs, scs) -> (vs :: vacc, ccs :: cacc, scs :: scacc)
-        | None -> (vacc, cacc, scacc))
-      hashtbl ([], [], [])
+        | Some (v, c, u) -> ((v, c) :: s, u :: ua)
+        | None -> (s, ua))
+      hashtbl ([], [])
   in
-  let s_versions = Hashtbl.create 9 in
-  List.iter (fun x ->
-      if Hashtbl.mem s_versions x then
-        let ele = Hashtbl.find s_versions x in
-        Hashtbl.replace s_versions x (succ ele)
+  let s_stats = Hashtbl.create 9 in
+  let sua = List.combine stats uas in
+  List.iter (fun (s, ua) ->
+      if Hashtbl.mem s_stats s then
+        let cnt, uas = Hashtbl.find s_stats s in
+        let uas = if List.mem ua uas then uas else ua :: uas in
+        Hashtbl.replace s_stats s (succ cnt, uas)
       else
-        Hashtbl.add s_versions x 1) versions ;
-  Hashtbl.iter (fun (s, c) v ->
-      Printf.printf "%s used (%s proposed) %d times\n" (Printer.tls_version_to_string s) (Printer.tls_any_version_to_string c) v)
-    s_versions ;
-  let s_ciphers = Hashtbl.create 9 in
-  List.iter (fun x ->
-      if Hashtbl.mem s_ciphers x then
-        let ele = Hashtbl.find s_ciphers x in
-        Hashtbl.replace s_ciphers x (succ ele)
-      else
-        Hashtbl.add s_ciphers x 1) server_cs ;
-  Hashtbl.iter (fun c v ->
-      Printf.printf "%s used %d times\n" (Ciphersuite.ciphersuite_to_string c) v)
-    s_ciphers
-(*  let c_ciphers = Hashtbl.create 9 in
-  List.iter (fun x ->
-      if Hashtbl.mem c_ciphers x then
-        let ele = Hashtbl.find c_ciphers x in
-        Hashtbl.replace c_ciphers x (succ ele)
-      else
-        Hashtbl.add c_ciphers x 1) client_cs ;
-  Hashtbl.iter (fun c v ->
-      Printf.printf "%d clients proposed %s\n" v (String.concat ", " (List.map Packet.any_ciphersuite_to_string c)))
-    c_ciphers *)
+        Hashtbl.add s_stats s (1, [ua])) sua ;
+  Hashtbl.iter (fun (ver, cip) (v, ua) ->
+      Printf.printf "%d %s %s used by %d\n" v (Printer.tls_version_to_string ver) (Ciphersuite.ciphersuite_to_string cip) (List.length (Utils.filter_map ~f:(fun x -> x) ua)))
+    s_stats ;
+  let uas = Hashtbl.fold (fun k (_, uas) acc ->
+      let rec maybe_add ac xs =
+        match xs with
+        | [] -> ac
+        | None::xs -> maybe_add ac xs
+        | (Some x)::xs when List.mem x ac -> maybe_add ac xs
+        | (Some x)::xs -> maybe_add (x :: ac) xs
+      in
+      maybe_add acc uas) s_stats []
+  in
+  Printf.printf "%d user-agents:\n%s\n" (List.length uas) (String.concat "\n" uas)
 
 let run dir file =
   match dir, file with
   | Some dir, _ ->
     let successes = Hashtbl.create 100
     and alerts = Hashtbl.create 100
+    and early_alerts = Hashtbl.create 100
     and failures = Hashtbl.create 100
     in
     let suc (name, (ts, (alert, traces))) =
@@ -134,8 +114,11 @@ let run dir file =
           Hashtbl.add successes name (ts, traces)
       | Some x ->
         if len < 3 then
-          (* Printf.printf "%d elements - broken alert trace at %s ?\n" len name *)
-          ()
+          if Hashtbl.mem early_alerts x then
+            let ele = Hashtbl.find early_alerts x in
+            Hashtbl.replace early_alerts x ((ts, name) :: ele)
+          else
+            Hashtbl.add early_alerts x [(ts, name)]
         else if Hashtbl.mem alerts x then
           let ele = Hashtbl.find alerts x in
           Hashtbl.replace alerts x ((ts, name) :: ele)
@@ -160,6 +143,9 @@ let run dir file =
     Hashtbl.iter (fun k v ->
         Printf.printf "alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       alerts ;
+    Hashtbl.iter (fun k v ->
+        Printf.printf "early alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
+      early_alerts ;
     analyse_success successes
 (*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
