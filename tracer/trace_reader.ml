@@ -111,6 +111,18 @@ let rec unique acc = function
   | x::xs when List.mem x acc -> unique acc xs
   | x::xs -> unique (x :: acc) xs
 
+let count_unique xs =
+  let data = Hashtbl.create (List.length xs) in
+  List.iter (fun x ->
+      if Hashtbl.mem data x then
+        let ele = Hashtbl.find data x in
+        Hashtbl.replace data x (succ ele)
+      else
+        Hashtbl.add data x 1) xs ;
+  Hashtbl.fold (fun k v acc ->
+      (k, v) :: acc)
+    data []
+
 let analyse_alerts hashtbl =
   (* err -> (timestamp, name, traces) *)
   let version_fails =
@@ -157,7 +169,7 @@ let analyse_alerts hashtbl =
        | _ -> assert false )
     | _ -> assert false
   in
-  let find_record_in t =
+  let find_record_in (_, name, t) =
     match
       find_trace (function `RecordIn _ -> true | _ -> false) (List.rev t)
     with
@@ -168,21 +180,22 @@ let analyse_alerts hashtbl =
          ( match Reader.parse_alert data with
            | Reader.Or_error.Ok (lvl, typ) ->
              (Packet.alert_level_to_string lvl) ^ ", " ^ (Packet.alert_type_to_string typ)
-           | _ -> Printf.sprintf "%02x %02x" (Cstruct.get_uint8 data 0) (Cstruct.get_uint8 data 1) )
+           | _ -> Printf.sprintf "%s unknown alert %02x %02x" name
+                    (Cstruct.get_uint8 data 0) (Cstruct.get_uint8 data 1) )
        | Packet.HANDSHAKE ->
          ( match Reader.parse_handshake data with
            | Reader.Or_error.Ok hs -> Printer.handshake_to_string hs
-           | _ -> Printf.sprintf "unknown hs %02x" (Cstruct.get_uint8 data 0) )
+           | _ -> Printf.sprintf "%s unknown hs %02x" name (Cstruct.get_uint8 data 0) )
        | _ -> "unknown content" )
     | _ -> assert false
   in
   let last_state = List.map find_hs_state unexpected_traces in
-  let last_record = List.map find_record_in unexpected_traces in
-  let lsu = unique [] (List.combine last_state last_record) in
+  let last_record = List.map find_record_in unexpected in
+  let lsu = count_unique (List.combine last_state last_record) in
   Printf.printf "%d unexpected\n%s\n"
     (List.length last_state)
-    (String.concat "\n" (List.map (fun (a, b) ->
-         "state: " ^ a ^ ", content type: " ^ b)
+    (String.concat "\n" (List.map (fun ((a, b), c) ->
+         (string_of_int c) ^ ": state: " ^ a ^ ", content type: " ^ b)
          lsu))
 
 let run dir file =
