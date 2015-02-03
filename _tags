@@ -1,17 +1,5 @@
 # OASIS_START
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-# DO NOT EDIT (digest: c79c812799f3937fe16f29e5e4744ab0)
-=======
-# DO NOT EDIT (digest: 16a99f9e5db7a8d2b7fdabfd5dc66f64)
->>>>>>> regenerate for trace reader
-=======
-# DO NOT EDIT (digest: d4e464d24e502178b3bf77ff4daff060)
->>>>>>> regenerate
-=======
-# DO NOT EDIT (digest: d515696e2bca04d46689ecbb93ef78aa)
->>>>>>> initial trace checker - passing a record containing cipher/version/server_random/dh secret through..
+# DO NOT EDIT (digest: 0c259548958637901c11f3f72618318e)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
