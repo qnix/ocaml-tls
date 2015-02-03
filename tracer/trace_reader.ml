@@ -180,12 +180,23 @@ let analyse_alerts hashtbl =
          ( match Reader.parse_alert data with
            | Reader.Or_error.Ok (lvl, typ) ->
              (Packet.alert_level_to_string lvl) ^ ", " ^ (Packet.alert_type_to_string typ)
-           | _ -> Printf.sprintf "%s unknown alert %02x %02x" name
+           | _ -> Printf.sprintf "unknown alert %02x %02x"
                     (Cstruct.get_uint8 data 0) (Cstruct.get_uint8 data 1) )
        | Packet.HANDSHAKE ->
          ( match Reader.parse_handshake data with
            | Reader.Or_error.Ok hs -> Printer.handshake_to_string hs
-           | _ -> Printf.sprintf "%s unknown hs %02x" name (Cstruct.get_uint8 data 0) )
+           | Reader.Or_error.Error (TrailingBytes x) ->
+             Printf.sprintf "handshake %02x trailing bytes %s"
+               (Cstruct.get_uint8 data 0) x
+           | Reader.Or_error.Error (Unknown x) ->
+             Printf.sprintf "handshake %02x unknown %s"
+               (Cstruct.get_uint8 data 0) x
+           | Reader.Or_error.Error (WrongLength x) ->
+             Printf.sprintf "handshake %02x wrong length %s"
+               (Cstruct.get_uint8 data 0) x
+           | Reader.Or_error.Error Underflow ->
+             Printf.sprintf "handshake %02x underflow"
+               (Cstruct.get_uint8 data 0) )
        | _ -> "unknown content" )
     | _ -> assert false
   in
