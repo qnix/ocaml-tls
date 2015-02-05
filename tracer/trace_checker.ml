@@ -59,8 +59,8 @@ let replay (trace : trace list) =
     let handshake = { st.handshake with config } in
     let st = { st with handshake } in
     match Engine.handle_raw_record ~valid st client_hello with
-    | Core.Error e -> Printf.printf "sth failed %s\n" (Packet.alert_type_to_string e)
-    | Core.Ok (st', out, data, err) ->
+    | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+    | State.Ok (st', out, data, err) ->
       assert (data = None) ; assert (err = `No_err) ;
       match out with
       | [] -> Printf.printf "out is empty!?\n"

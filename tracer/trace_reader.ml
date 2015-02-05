@@ -2,6 +2,13 @@ open Read_trace
 
 open Tls
 
+let cs_mmap file =
+  Unix_cstruct.of_fd Unix.(openfile file [O_RDONLY] 0)
+
+let priv, cert =
+  let file = cs_mmap "/home/hannes/tls-certs-mirage/openmirage.pem" in
+  (X509.PK.of_pem_cstruct1 file, X509.Cert.of_pem_cstruct file)
+
 let to_re str =
   (Str.regexp_string str, String.length str)
 
@@ -123,6 +130,35 @@ let count_unique xs =
       (k, v) :: acc)
     data []
 
+
+let null_cs c =
+  let open Packet in
+  match c with
+  | TLS_NULL_WITH_NULL_NULL
+  | TLS_RSA_WITH_NULL_MD5
+  | TLS_RSA_WITH_NULL_SHA
+  | RESERVED_SSL3_1
+  | RESERVED_SSL3_2
+  | TLS_PSK_WITH_NULL_SHA
+  | TLS_DHE_PSK_WITH_NULL_SHA
+  | TLS_RSA_PSK_WITH_NULL_SHA
+  | TLS_RSA_WITH_NULL_SHA256
+  | TLS_PSK_WITH_NULL_SHA256
+  | TLS_PSK_WITH_NULL_SHA384
+  | TLS_DHE_PSK_WITH_NULL_SHA256
+  | TLS_DHE_PSK_WITH_NULL_SHA384
+  | TLS_RSA_PSK_WITH_NULL_SHA256
+  | TLS_RSA_PSK_WITH_NULL_SHA384
+  | TLS_ECDH_ECDSA_WITH_NULL_SHA
+  | TLS_ECDHE_ECDSA_WITH_NULL_SHA
+  | TLS_ECDH_RSA_WITH_NULL_SHA
+  | TLS_ECDHE_RSA_WITH_NULL_SHA
+  | TLS_ECDH_anon_WITH_NULL_SHA
+  | TLS_ECDHE_PSK_WITH_NULL_SHA
+  | TLS_ECDHE_PSK_WITH_NULL_SHA256
+  | TLS_ECDHE_PSK_WITH_NULL_SHA384 -> true
+  | _ -> false
+
 let analyse_alerts hashtbl =
   (* err -> (timestamp, name, traces) *)
   let version_fails =
@@ -207,9 +243,73 @@ let analyse_alerts hashtbl =
     (List.length last_state)
     (String.concat "\n" (List.map (fun ((a, b), c) ->
          (string_of_int c) ^ ": state: " ^ a ^ ", content type: " ^ b)
-         lsu))
+         lsu)) ;
+
+  let failed =
+    Hashtbl.find hashtbl (Core.sexp_of_tls_alert (Packet.FATAL, Packet.HANDSHAKE_FAILURE))
+  in
+
+  (* replay them for more detailed error message *)
+  let err (_, n, t) =
+    let client_hello t =
+      let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
+      match
+        find_trace (function `RecordIn (hdr, data) -> hdr.Core.content_type = Packet.HANDSHAKE && tst data | _ -> false) t
+      with
+      | Some (`RecordIn (hdr, data)) -> (hdr, data)
+      | _ -> assert false
+    in
+
+    let state t =
+      match
+        find_trace (function `StateIn _ -> true | _ -> false) t
+      with
+      | Some (`StateIn x) -> x
+      | _ -> assert false
+    in
+
+    let in_state = state t
+    and ch = client_hello t
+    in
+    let config = { in_state.State.handshake.State.config with
+                   own_certificates = `Single (cert, priv) } in
+    let handshake = { in_state.State.handshake with config } in
+    let in_state = { in_state with handshake } in
+    let extract_ch b =
+      match Reader.parse_handshake (snd b) with
+      | Reader.Or_error.Ok (ClientHello ch) -> ch
+      | _ -> assert false
+    in
+    match Engine.handle_raw_record in_state ch with
+    | State.Ok (st, out, app, err) ->
+      let ch = extract_ch ch in
+      if List.exists null_cs ch.Core.ciphersuites then
+        Some (`Impossible `NullProposed)
+      else
+        (Printf.printf "nothing wrong in %s\n" n ; None)
+    | State.Error (`Impossible `InvalidClientHello) ->
+      let ch = extract_ch ch in
+      if List.length (List.filter (function Packet.TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
+        Some (`Impossible `DuplicatedCamellia)
+      else if List.length (List.filter (function Packet.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
+        Some (`Impossible `DuplicatedEcdheAes128)
+      else
+        (Printf.printf "client hello invalid in %s\n" n;  Some (`Impossible `InvalidClientHello))
+    | State.Error x -> Some x
+
+  in
+
+  let errs = List.map err failed in
+  let trace_len = count_unique errs in
+  Printf.printf "%d handshake failure:\n%s\n"
+    (List.length failed) (String.concat "\n" (List.map (fun (err, cnt) ->
+        let v = match err with None -> "none" | Some x -> Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure x) in
+        (string_of_int cnt) ^ " times " ^ v)
+        trace_len))
+
 
 let run dir file =
+  Nocrypto.Rng.reseed (Cstruct.create 10);
   match dir, file with
   | Some dir, _ ->
     let successes = Hashtbl.create 100
