@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 0c259548958637901c11f3f72618318e)
+# DO NOT EDIT (digest: 432499eacc1de9c2d64aa97bb619bb70)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -172,6 +172,7 @@ true: annot, bin_annot
 "tracer/tracing.cmxs": use_tracing
 # Executable trace_reader
 "tracer/trace_reader.native": pkg_cstruct.syntax
+"tracer/trace_reader.native": pkg_cstruct.unix
 "tracer/trace_reader.native": pkg_nocrypto
 "tracer/trace_reader.native": pkg_sexplib
 "tracer/trace_reader.native": pkg_sexplib.syntax
