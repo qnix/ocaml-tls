@@ -159,6 +159,14 @@ let null_cs c =
   | TLS_ECDHE_PSK_WITH_NULL_SHA384 -> true
   | _ -> false
 
+type f = [
+  | `Failure of Tls.Engine.failure
+  | `DuplicatedCamellia
+  | `DuplicatedEcdheAes128
+  | `NullProposed
+  | `NoCipher
+] with sexp
+
 let analyse_alerts hashtbl =
   (* err -> (timestamp, name, traces) *)
   let version_fails =
@@ -284,18 +292,19 @@ let analyse_alerts hashtbl =
     | State.Ok (st, out, app, err) ->
       let ch = extract_ch ch in
       if List.exists null_cs ch.Core.ciphersuites then
-        Some (`Impossible `NullProposed)
+        Some `NullProposed
       else
         (Printf.printf "nothing wrong in %s\n" n ; None)
     | State.Error (`Impossible `InvalidClientHello) ->
       let ch = extract_ch ch in
       if List.length (List.filter (function Packet.TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
-        Some (`Impossible `DuplicatedCamellia)
+        Some `DuplicatedCamellia
       else if List.length (List.filter (function Packet.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
-        Some (`Impossible `DuplicatedEcdheAes128)
+        Some `DuplicatedEcdheAes128
       else
-        (Printf.printf "client hello invalid in %s\n" n;  Some (`Impossible `InvalidClientHello))
-    | State.Error x -> Some x
+        (Printf.printf "client hello invalid in %s\n" n;  Some (`Failure (`Impossible `InvalidClientHello)))
+    | State.Error (`Impossible (`NoCiphersuite _)) -> Some `NoCipher
+    | State.Error x -> Some (`Failure x)
 
   in
 
@@ -303,7 +312,7 @@ let analyse_alerts hashtbl =
   let trace_len = count_unique errs in
   Printf.printf "%d handshake failure:\n%s\n"
     (List.length failed) (String.concat "\n" (List.map (fun (err, cnt) ->
-        let v = match err with None -> "none" | Some x -> Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure x) in
+        let v = match err with None -> "none" | Some x -> Sexplib.Sexp.to_string_hum (sexp_of_f x) in
         (string_of_int cnt) ^ " times " ^ v)
         trace_len))
 

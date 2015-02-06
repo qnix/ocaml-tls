@@ -80,7 +80,7 @@ val handle_tls : state -> Cstruct.t -> ret
 
 type raw_record = Core.tls_hdr * Cstruct.t
 type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
-val handle_raw_record : ?valid:State.validate -> state -> raw_record -> (state * (Packet.content_type * Cstruct.t) list * Cstruct.t option * err) Core.t
+val handle_raw_record : ?valid:State.validate -> state -> raw_record -> (state * (Packet.content_type * Cstruct.t) list * Cstruct.t option * err) State.t
 
 
 (** [can_handle_appdata tls] is a predicate which indicates when the connection has already completed a handshake *)

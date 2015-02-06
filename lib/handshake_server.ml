@@ -321,6 +321,7 @@ let answer_client_hello valid state (ch : client_hello) raw =
     (match valid.version with
      | None -> agreed_version config.protocol_versions ch.version
      | Some x -> return x )
+    >>= fun version ->
     guard (not (List.mem Packet.TLS_FALLBACK_SCSV cciphers) ||
            version = max_protocol_version config.protocol_versions)
       (`Fatal `InappropriateFallback) >>= fun () ->
