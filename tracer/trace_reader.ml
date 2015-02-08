@@ -321,7 +321,7 @@ let analyse_alerts hashtbl =
       else
         (Printf.printf "client hello invalid in %s\n" n;  Some (`Failure (`Fatal `InvalidClientHello)))
     | State.Error (`Fatal (`NoCiphersuite _)) -> Some `NoCipher
-    | State.Error (`Problematic (`NoConfiguredCiphersuite _)) -> Some `NoCipherYet
+    | State.Error (`Error (`NoConfiguredCiphersuite _)) -> Some `NoCipherYet
     | State.Error (`Fatal `InvalidRenegotiation) ->
       Printf.printf "invalid renegotiation %s\n" n ;
       Some (`Failure (`Fatal `InvalidRenegotiation))
