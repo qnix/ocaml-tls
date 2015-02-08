@@ -48,6 +48,23 @@ let rec find_trace (p : trace -> bool) (xs : trace list) =
   | x::_ when p x -> Some x
   | _::xs -> find_trace p xs
 
+let rec unique acc = function
+  | [] -> acc
+  | x::xs when List.mem x acc -> unique acc xs
+  | x::xs -> unique (x :: acc) xs
+
+let count_unique xs =
+  let data = Hashtbl.create (List.length xs) in
+  List.iter (fun x ->
+      if Hashtbl.mem data x then
+        let ele = Hashtbl.find data x in
+        Hashtbl.replace data x (succ ele)
+      else
+        Hashtbl.add data x 1) xs ;
+  Hashtbl.fold (fun k v acc ->
+      (k, v) :: acc)
+    data []
+
 let analyse_trace name trace =
   let server_hello =
     let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
@@ -85,7 +102,11 @@ let analyse_success hashtbl =
       else
         Hashtbl.add s_stats s (1, [ua])) sua ;
   Hashtbl.iter (fun (ver, cip) (v, ua) ->
-      Printf.printf "%d %s %s used by %d\n" v (Printer.tls_version_to_string ver) (Ciphersuite.ciphersuite_to_string cip) (List.length (Utils.filter_map ~f:(fun x -> x) ua)))
+      Printf.printf "%d %s %s used by %d\n"
+        v
+        (Printer.tls_version_to_string ver)
+        (Ciphersuite.ciphersuite_to_string cip)
+        (List.length (Utils.filter_map ~f:(fun x -> x) ua)))
     s_stats ;
   let uas = Hashtbl.fold (fun k (_, uas) acc ->
       let rec maybe_add ac xs =
@@ -99,6 +120,20 @@ let analyse_success hashtbl =
   in
   Printf.printf "%d user-agents:\n%s\n" (List.length uas) (String.concat "\n" uas)
 
+let analyse_reneg t =
+  List.length (List.filter (function `HelloRequest -> true | _ -> false) t)
+
+let analyse_renegs hashtbl =
+  let renegs =
+    Hashtbl.fold (fun n (_, trace) rs ->
+        analyse_reneg trace :: rs)
+      hashtbl []
+  in
+  let rs = count_unique renegs in
+  Printf.printf "renegs:\n  %s\n"
+    (String.concat "\n  " (List.map (fun (renegcount, tracecount) ->
+         (string_of_int renegcount) ^ ": " ^ (string_of_int tracecount))
+         (List.sort (fun (a, _) (b, _) -> compare a b) rs)))
 
 let analyse_protocol_version trace =
   let client_hello =
@@ -111,25 +146,6 @@ let analyse_protocol_version trace =
   match client_hello with
   | Reader.Or_error.Ok Core.ClientHello ch -> ch.Core.version
   | _ -> assert false
-
-
-let rec unique acc = function
-  | [] -> acc
-  | x::xs when List.mem x acc -> unique acc xs
-  | x::xs -> unique (x :: acc) xs
-
-let count_unique xs =
-  let data = Hashtbl.create (List.length xs) in
-  List.iter (fun x ->
-      if Hashtbl.mem data x then
-        let ele = Hashtbl.find data x in
-        Hashtbl.replace data x (succ ele)
-      else
-        Hashtbl.add data x 1) xs ;
-  Hashtbl.fold (fun k v acc ->
-      (k, v) :: acc)
-    data []
-
 
 let null_cs c =
   let open Packet in
@@ -214,13 +230,13 @@ let analyse_alerts hashtbl =
        | _ -> assert false )
     | _ -> assert false
   in
-  let find_record_in (_, name, t) =
+  let find_record_in (ts, name, t) =
     match
       find_trace (function `RecordIn _ -> true | _ -> false) (List.rev t)
     with
     | Some (`RecordIn (hdr, data)) ->
       (match hdr.Core.content_type with
-       | Packet.CHANGE_CIPHER_SPEC -> "CCS"
+       | Packet.CHANGE_CIPHER_SPEC -> (* Printf.printf "%s ccs\n" ts ; *) "CCS"
        | Packet.ALERT ->
          ( match Reader.parse_alert data with
            | Reader.Or_error.Ok (lvl, typ) ->
@@ -296,19 +312,19 @@ let analyse_alerts hashtbl =
         Some `NullProposed
       else
         (Printf.printf "nothing wrong in %s\n" n ; None)
-    | State.Error (`Impossible `InvalidClientHello) ->
+    | State.Error (`Fatal `InvalidClientHello) ->
       let ch = extract_ch ch in
       if List.length (List.filter (function Packet.TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
         Some `DuplicatedCamellia
       else if List.length (List.filter (function Packet.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
         Some `DuplicatedEcdheAes128
       else
-        (Printf.printf "client hello invalid in %s\n" n;  Some (`Failure (`Impossible `InvalidClientHello)))
-    | State.Error (`Impossible (`NoCiphersuite _)) -> Some `NoCipher
+        (Printf.printf "client hello invalid in %s\n" n;  Some (`Failure (`Fatal `InvalidClientHello)))
+    | State.Error (`Fatal (`NoCiphersuite _)) -> Some `NoCipher
     | State.Error (`Problematic (`NoConfiguredCiphersuite _)) -> Some `NoCipherYet
-    | State.Error (`Impossible `InvalidRenegotiation) ->
+    | State.Error (`Fatal `InvalidRenegotiation) ->
       Printf.printf "invalid renegotiation %s\n" n ;
-      Some (`Failure (`Impossible `InvalidRenegotiation))
+      Some (`Failure (`Fatal `InvalidRenegotiation))
     | State.Error x -> Some (`Failure x)
 
   in
@@ -397,7 +413,8 @@ let run dir file =
         Printf.printf "early alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       early_alerts ;
     analyse_alerts alerts
-    (*    analyse_success successes *)
+    (* analyse_success successes *)
+    (* analyse_renegs successes *)
 (*    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
       failures *)

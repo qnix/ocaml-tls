@@ -272,6 +272,7 @@ type trace = [
   | `ApplicationDataIn of Cstruct_s.t
   | `AlertOut of Core.tls_alert
   | `AlertIn of Core.tls_alert
+  | `HelloRequest
 ]
 
 let process_sexp acc x =
@@ -326,6 +327,8 @@ let process_sexp acc x =
     `AlertOut (Core.tls_alert_of_sexp alert) :: acc
   | List [ Atom "alert-in" ; alert ] ->
     `AlertIn (Core.tls_alert_of_sexp alert) :: acc
+  | List [ Atom "handshake-out" ; Atom "HelloRequest" ] ->
+    `HelloRequest :: acc
   | List [ Atom x ; xs ] -> (* Printf.printf "ignoring %s\n" x ; *) acc
   | xs -> Printf.printf "unexpected %s\n" (to_string_hum xs) ; acc
 
