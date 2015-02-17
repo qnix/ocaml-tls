@@ -390,6 +390,7 @@ let load_dir dir =
   let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in
   let suc = ref []
   and fai = ref []
+  and skip = ref []
   in
   while not (!filen = None) do
     let Some filename = !filen in
@@ -398,7 +399,7 @@ let load_dir dir =
        suc := (filename, trace) :: !suc
      with
      | Trace_error e -> fai := (filename, e) :: !fai
-     | e -> Printf.printf "problem with file %s\n%!" filename ; raise e) ;
+     | e -> Printf.printf "problem with file %s, skipping\n%!" filename; skip := filename :: !skip) ;
     filen := try Some (Unix.readdir dirent) with End_of_file -> None
   done ;
-  (!suc, !fai)
+  (!suc, !fai, !skip)

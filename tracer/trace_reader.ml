@@ -118,7 +118,7 @@ let analyse_success hashtbl =
       in
       maybe_add acc uas) s_stats []
   in
-  Printf.printf "%d user-agents:\n%s\n" (List.length uas) (String.concat "\n" uas)
+  Printf.printf "%d disjoint user-agents\n  %s\n" (List.length uas) (String.concat "\n  " uas)
 
 let analyse_reneg t =
   List.length (List.filter (function `HelloRequest -> true | _ -> false) t)
@@ -395,7 +395,8 @@ let run dir file =
         Hashtbl.add failures e [name]
     in
 
-    let success, fail = load_dir dir in
+    let success, fail, skip = load_dir dir in
+    Printf.printf "skipped %d\n" (List.length skip) ;
     List.iter suc success ;
     List.iter fails fail ;
 
@@ -412,12 +413,12 @@ let run dir file =
     Hashtbl.iter (fun k v ->
         Printf.printf "early alert %s count %d\n" (Sexplib.Sexp.to_string_hum k) (List.length v))
       early_alerts ;
-    analyse_alerts alerts
-    (* analyse_success successes *)
-    (* analyse_renegs successes *)
-(*    Hashtbl.iter (fun k v ->
+    analyse_alerts alerts ;
+    analyse_success successes ;
+    analyse_renegs successes ;
+    Hashtbl.iter (fun k v ->
         Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
-      failures *)
+      failures
 
   | None, Some file ->
     (try (let ts, (alert, traces) = load file in
