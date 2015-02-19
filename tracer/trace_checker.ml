@@ -123,6 +123,9 @@ let rec replay ?valid state = function
                 ( match find_out xs with
                   | Some (t, out_raw) ->
                     let raw_out = fixup_pack { hdr with Core.content_type = t } out_raw in
+                    if not (Uncommon.Cs.equal raw_out out) then
+                      (Printf.printf "raw_out" ; Cstruct.hexdump raw_out ;
+                       Printf.printf "out" ; Cstruct.hexdump out ) ;
                     assert (Uncommon.Cs.equal raw_out out) ;
                     Printf.printf "handshake out is the same!\n" ;
                     replay ?valid state' xs
@@ -141,22 +144,53 @@ let rec replay ?valid state = function
   | [] -> Printf.printf "sucess!\n"
     (* should do sth useful with state.. *)
 
-let run dir file =
+let rec mix c s =
+  match c, s with
+  | [], [] -> []
+  | [c], [] ->
+    ( match Engine.separate_records c with
+      | State.Ok (xs, rest) ->
+        assert (Cstruct.len rest = 0) ;
+        List.map (fun x -> `RecordIn x) xs )
+  | c::cs, s::ss ->
+    match Engine.separate_records c, Engine.separate_records s with
+    | State.Ok (xs, rest), State.Ok (ys, rest') ->
+      assert (Cstruct.len rest = 0) ;
+      assert (Cstruct.len rest' = 0) ;
+      let c = List.map (fun x -> `RecordIn x) xs in
+      let s = List.map (fun (hdr, data) -> `RecordOut (hdr.Core.content_type, data)) ys in
+      c @ s @ mix cs ss
+    | _ -> assert false
+
+let reconstruct =
+  let client = List.map Nocrypto.Uncommon.Cs.of_hex Trace_data.client
+  and server = List.map Nocrypto.Uncommon.Cs.of_hex Trace_data.server
+  in
+  let trace = mix client server in
+  let config = Config.server ~ciphers:[`TLS_RSA_WITH_RC4_128_MD5] ~certificates:(`Single (cert, priv)) () in
+  let state = Engine.server config in
+  (state, trace)
+
+let run dir file pcap =
   Nocrypto.Rng.reseed (Cstruct.create 10);
-  match dir, file with
-  | Some dir, _ ->
+  match dir, file, pcap with
+  | Some dir, _, _ ->
     Printf.printf "not yet implemented\n"
-  | None, Some file ->
+  | None, Some file, _ ->
     let ts, (alert, trace) = load file in
     ( match alert with
       | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
       | None ->
         let state = init trace in
         replay state trace)
+  | None, None, Some _ ->
+    let state, trace = reconstruct in
+    replay state trace
   | _ -> assert false
 
 let trace_dir = ref None
 let trace_file = ref None
+let trace_pcap = ref None
 let rest = ref []
 
 let usage = "usage " ^ Sys.argv.(0)
@@ -164,8 +198,9 @@ let usage = "usage " ^ Sys.argv.(0)
 let arglist = [
   ("-f", Arg.String (fun f -> trace_file := Some f), "trace file");
   ("-d", Arg.String (fun d -> trace_dir := Some d), "trace directory");
+  ("-p", Arg.String (fun p -> trace_pcap := Some p), "trace pcap");
 ]
 
 let () =
   Arg.parse arglist (fun x -> rest := x :: !rest) usage ;
-  run !trace_dir !trace_file
+  run !trace_dir !trace_file !trace_pcap
