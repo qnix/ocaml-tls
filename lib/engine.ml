@@ -424,7 +424,7 @@ let assemble_records (version : tls_version) : record list -> Cstruct.t =
   o Cs.appends @@ List.map @@ Writer.assemble_hdr version
 
 (* main entry point *)
-let handle_tls state buf =
+let handle_tls ?valid state buf =
 
   (* Tracing.sexpf ~tag:"state-in" ~f:sexp_of_state state ; *)
 

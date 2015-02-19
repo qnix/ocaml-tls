@@ -76,7 +76,7 @@ type ret = [
 ]
 
 (** [handle_tls tls in] is [ret], depending on incoming [tls] state and cstruct, return appropriate [ret] *)
-val handle_tls : state -> Cstruct.t -> ret
+val handle_tls : ?valid:State.validate -> state -> Cstruct.t -> ret
 
 type raw_record = Core.tls_hdr * Cstruct.t
 type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
