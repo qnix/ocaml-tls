@@ -17,57 +17,83 @@ let to_cstruct_sized { p; _ } z =
 let public_of_secret (({ p; gg; _ } as group), { x }) =
   to_cstruct_sized group (Z.(powm gg x p))
 
-let replay (trace : trace list) =
-  let rec go p = function
-    | [] -> None
-    | x::_ when p x -> Some x
-    | _::xs -> go p xs
-  in
-  let initial_state = go (function `StateIn x -> true | _ -> false) trace
-  in
-  let client_hello =
-    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 1 in
-    let ch = go (function `RecordIn (tls_hdr, d) when tls_hdr.Core.content_type = Packet.HANDSHAKE && tst d -> true | _ -> false) trace in
-    match ch with
-    | Some (`RecordIn r) -> r
-    | _ -> assert false
-  in
-  let fst_out =
-    let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
-    let sh = go (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false) trace in
-    match sh with
-    | Some (`RecordOut (_, out)) -> out
-    | _ -> assert false
-  in
-  let server_hello =
-    let buflen = Reader.parse_handshake_length fst_out in
-    Cstruct.sub fst_out 0 (buflen + 4)
-  in
-  match initial_state, Reader.parse_handshake server_hello with
-  | Some (`StateIn st), Reader.Or_error.Ok Core.ServerHello sh ->
-    let dh_sent = match Ciphersuite.ciphersuite_kex sh.Core.ciphersuites with
-      | Ciphersuite.RSA -> None
-      | Ciphersuite.DHE_RSA ->
-        let awaitckex = go (function `StateOut st -> (match st.State.handshake.State.machina with
-              State.Server (State.AwaitClientKeyExchange_DHE_RSA _) -> true | _ -> false) | _ -> false) trace in
-        match awaitckex with
-        | Some (`StateOut st) -> match st.State.handshake.State.machina with
-          | State.Server (State.AwaitClientKeyExchange_DHE_RSA (_, dh_sent, _)) -> Some (dh_sent, public_of_secret dh_sent)
-    in
-    let valid = State.{ version = Some sh.Core.version ; cipher = Some sh.Core.ciphersuites ; server_random = Some sh.Core.random ; dh_sent } in
-    let config = { st.handshake.config with own_certificates = `Single (cert, priv) } in
-    let handshake = { st.handshake with config } in
-    let st = { st with handshake } in
-    match Engine.handle_raw_record ~valid st client_hello with
-    | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+(* pull out initial state *)
+let init (trace : trace list) =
+  match find_trace (function `StateIn x -> true | _ -> false) trace with
+  | Some (`StateIn x) -> x
+  | _ -> assert false
+
+let find_server_hello (trace : trace list) =
+  let tst data = Cstruct.len data > 0 && Cstruct.get_uint8 data 0 = 2 in
+  match
+    find_trace
+      (function `RecordOut (Packet.HANDSHAKE, d) when tst d -> true | _ -> false)
+      trace
+  with
+  | Some (`RecordOut (_, out)) -> out
+  | _ -> assert false
+
+let parse_server_hello out =
+  let buflen = Reader.parse_handshake_length out in
+  let data = Cstruct.sub out 0 (buflen + 4) in
+  match Reader.parse_handshake data with
+  | Reader.Or_error.Ok Core.ServerHello sh -> sh
+  | _ -> assert false
+
+let find_dh_sent (trace : trace list) =
+  match
+    find_trace
+      (function
+        | `StateOut st ->
+          ( match st.State.handshake.State.machina with
+            | State.Server (State.AwaitClientKeyExchange_DHE_RSA _) -> true
+            | _ -> false )
+        | _ -> false)
+      trace
+  with
+  | Some (`StateOut st) ->
+    ( match st.State.handshake.State.machina with
+      | State.Server (State.AwaitClientKeyExchange_DHE_RSA (_, dh_sent, _)) ->
+        Some (dh_sent, public_of_secret dh_sent)
+      | _ -> None )
+  | _ -> None
+
+let rec replay state = function
+  | (`RecordIn (hdr, data))::xs when hdr.Core.content_type = Packet.HANDSHAKE ->
+    ( match Cstruct.get_uint8 data 0 with
+      | 1 (* client hello *) ->
+        let next_out_raw = find_server_hello xs in
+        let server_hello = parse_server_hello next_out_raw in
+        let dh_sent = match Ciphersuite.ciphersuite_kex server_hello.Core.ciphersuites with
+          | Ciphersuite.RSA -> None
+          | Ciphersuite.DHE_RSA -> find_dh_sent xs
+        in
+        let valid = State.{ version = Some server_hello.Core.version ;
+                            cipher = Some server_hello.Core.ciphersuites ;
+                            server_random = Some server_hello.Core.random ;
+                            dh_sent } in
+        let config = {
+          state.State.handshake.State.config with
+            own_certificates = `Single (cert, priv)
+        } in
+        let handshake = { state.State.handshake with config } in
+        let state = { state with handshake } in
+    match Engine.handle_raw_record ~valid state (hdr, data) with
     | State.Ok (st', out, data, err) ->
       assert (data = None) ; assert (err = `No_err) ;
-      match out with
-      | [] -> Printf.printf "out is empty!?\n"
-      | (_, fst_out')::_ ->
-        assert (Uncommon.Cs.equal fst_out fst_out') ;
-        Printf.printf "first handshake out is the same!\n"
-
+      ( match out with
+        | [] -> Printf.printf "out is empty!?\n"
+        | (_, fst_out')::_ ->
+          assert (Uncommon.Cs.equal next_out_raw fst_out') ;
+          Printf.printf "first handshake out is the same!\n"  )
+    | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+    )
+  | (`RecordOut (Packet.HANDSHAKE, rec_out))::xs -> Printf.printf "should handle record out!\n"
+  | _::xs -> replay state xs
+  | [] -> Printf.printf "sucess!\n"
+  (* | `AlertIn alert_in ->
+     | `AlertOut alert_out -> *)
+    (* should do sth useful with state.. *)
 
 let run dir file =
   Nocrypto.Rng.reseed (Cstruct.create 10);
@@ -78,7 +104,9 @@ let run dir file =
     let ts, (alert, trace) = load file in
     ( match alert with
       | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
-      | None -> replay trace)
+      | None ->
+        let state = init trace in
+        replay state trace)
   | _ -> assert false
 
 let trace_dir = ref None

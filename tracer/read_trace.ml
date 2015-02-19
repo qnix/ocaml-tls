@@ -275,6 +275,12 @@ type trace = [
   | `HelloRequest
 ]
 
+let rec find_trace (p : trace -> bool) (xs : trace list) =
+  match xs with
+  | [] -> None
+  | x::xs when p x -> Some x
+  | _::xs -> find_trace p xs
+
 let process_sexp acc x =
   let states = Utils.filter_map
       ~f:(function `StateIn x -> Some x | `StateOut x -> Some x | `State x -> Some x | _ -> None)
