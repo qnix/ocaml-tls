@@ -136,7 +136,7 @@ Executable "test_client"
 
 Library "tracing"
   Path            : tracer/
-  Modules         : Read_trace
+  Modules         : Read_trace, Trace_data
   Install         : false
   BuildDepends    : sexplib, sexplib.syntax, tls
 
