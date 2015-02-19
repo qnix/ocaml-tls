@@ -201,10 +201,11 @@ let answer_client_hello_common valid state reneg ch raw =
         match reneg with
         | None            -> SecureRenegotiation (Cstruct.create 0)
         | Some (cvd, svd) -> SecureRenegotiation (cvd <+> svd)
+      and sessionid = valid.session_id
       in
       { version      = state.protocol_version ;
         random       = random ;
-        sessionid    = None ;
+        sessionid ;
         ciphersuites = session.ciphersuite ;
         extensions   = secren :: host }
     in

@@ -78,6 +78,8 @@ type ret = [
 (** [handle_tls tls in] is [ret], depending on incoming [tls] state and cstruct, return appropriate [ret] *)
 val handle_tls : ?valid:State.validate -> state -> Cstruct.t -> ret
 
+val separate_records : Cstruct.t ->  ((Core.tls_hdr * Cstruct.t) list * Cstruct.t) State.t
+
 type raw_record = Core.tls_hdr * Cstruct.t
 type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
 val handle_raw_record : ?valid:State.validate -> state -> raw_record -> (state * (Packet.content_type * Cstruct.t) list * Cstruct.t option * err) State.t

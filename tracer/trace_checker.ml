@@ -80,6 +80,7 @@ let fixup_initial_state state raw next =
   let valid = State.{ version = Some server_hello.Core.version ;
                       cipher = Some server_hello.Core.ciphersuites ;
                       server_random = Some server_hello.Core.random ;
+                      session_id = server_hello.Core.sessionid ;
                       dh_sent } in
   let config = {
     state.State.handshake.State.config with

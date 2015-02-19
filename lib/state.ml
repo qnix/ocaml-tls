@@ -227,7 +227,8 @@ type validate = {
   cipher  : Ciphersuite.ciphersuite option ;
   server_random : Cstruct.t option ;
   dh_sent : (dh_sent * Cstruct.t) option ;
+  session_id : Cstruct.t option ;
 }
 
 let empty_valid _ =
-  { version = None ; cipher = None ; server_random = None ; dh_sent = None }
+  { version = None ; cipher = None ; server_random = None ; dh_sent = None ; session_id = None }
