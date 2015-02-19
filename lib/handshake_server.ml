@@ -217,7 +217,7 @@ let answer_client_hello_common valid state reneg ch raw =
     match session.own_certificate with
     | []    -> []
     | certs ->
-       let cert = Certificate (List.map Certificate.cs_of_cert certs) in
+       let cert = Certificate [List.hd (List.map Certificate.cs_of_cert certs)] in
        (* Tracing.sexpf ~tag:"handshake-out" ~f:sexp_of_tls_handshake cert ; *)
        [ Writer.assemble_handshake cert ]
 
@@ -297,7 +297,7 @@ let answer_client_hello_common valid state reneg ch raw =
     ) >|= fun (out_recs, machina) ->
 
   ({ state with machina = Server machina },
-   [`Record (Packet.HANDSHAKE, Cs.appends out_recs)])
+   List.map (fun x -> `Record (Packet.HANDSHAKE, x)) out_recs)
 
 let agreed_version supported requested =
   match supported_protocol_version supported requested with
