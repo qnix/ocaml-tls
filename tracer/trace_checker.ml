@@ -90,6 +90,14 @@ let fixup_initial_state state raw next =
   (valid, { state with handshake })
 
 
+(* what we should do: *)
+(* hello extension normaliser / equivalence -- we might want to pass extension types *)
+(* ensure that each RecordOut is normalised! *)
+(*   pass through the pending output records *)
+(*   when an input comes along: append outputs to pending outputs! *)
+(*   when an output comes along: check that it matches the first item *)
+(*   check invariants -- at the end out should be empty *)
+
 let rec replay ?valid state = function
   | (`RecordIn (hdr, data))::xs ->
     Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
