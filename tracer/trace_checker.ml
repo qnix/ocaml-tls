@@ -65,12 +65,6 @@ let find_dh_sent (trace : trace list) =
       | _ -> None )
   | _ -> None
 
-let fixup_pack (hdr : Core.tls_hdr) data =
-  match Core.any_version_to_version hdr.Core.version with
-  | Some x ->
-    Writer.assemble_hdr x (hdr.Core.content_type, data)
-  | None -> assert false
-
 
 (* configured is the range (min, max) -- chosen is the one from server hello -- requested the one from client hello  *)
 (* sanity: min >= chosen >= max ; requested >= chosen *)
@@ -149,7 +143,7 @@ let rec replay ?choices state = function
           | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
         end
       | _ ->
-        ( match Engine.handle_tls ?choices state (fixup_pack hdr data) with
+        ( match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
           | `Ok (st, `Response res, `Data dat) ->
             (match dat with
              | None -> ()
@@ -158,7 +152,7 @@ let rec replay ?choices state = function
               | `Ok state', Some out ->
                 ( match find_out xs with
                   | Some (t, out_raw) ->
-                    let raw_out = fixup_pack { hdr with Core.content_type = t } out_raw in
+                    let raw_out = fixup_in_record { hdr with Core.content_type = t } out_raw in
                     if not (Uncommon.Cs.equal raw_out out) then
                       (Printf.printf "raw_out" ; Cstruct.hexdump raw_out ;
                        Printf.printf "out" ; Cstruct.hexdump out ) ;

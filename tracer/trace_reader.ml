@@ -305,14 +305,14 @@ let analyse_alerts hashtbl =
       | Reader.Or_error.Ok (ClientHello ch) -> ch
       | _ -> assert false
     in
-    match Engine.handle_raw_record (Handshake_common.implementation_choices config) in_state ch with
-    | State.Ok (st, out, app, err) ->
+    match Engine.handle_tls in_state (fixup_in_record (fst ch) (snd ch)) with
+    | `Ok (`Ok st, `Response _, `Data _) ->
       let ch = extract_ch ch in
       if List.exists null_cs ch.Core.ciphersuites then
         Some `NullProposed
       else
         (Printf.printf "nothing wrong in %s\n" n ; None)
-    | State.Error (`Fatal `InvalidClientHello) ->
+    | `Fail ((`Fatal `InvalidClientHello), _) ->
       let ch = extract_ch ch in
       if List.length (List.filter (function Packet.TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256 -> true | _ -> false) ch.Core.ciphersuites) > 1 then
         Some `DuplicatedCamellia
@@ -320,12 +320,12 @@ let analyse_alerts hashtbl =
         Some `DuplicatedEcdheAes128
       else
         (Printf.printf "client hello invalid in %s\n" n;  Some (`Failure (`Fatal `InvalidClientHello)))
-    | State.Error (`Fatal (`NoCiphersuite _)) -> Some `NoCipher
-    | State.Error (`Error (`NoConfiguredCiphersuite _)) -> Some `NoCipherYet
-    | State.Error (`Fatal `InvalidRenegotiation) ->
+    | `Fail ((`Fatal (`NoCiphersuite _)), _) -> Some `NoCipher
+    | `Fail ((`Error (`NoConfiguredCiphersuite _)), _) -> Some `NoCipherYet
+    | `Fail ((`Fatal `InvalidRenegotiation), _) ->
       Printf.printf "invalid renegotiation %s\n" n ;
       Some (`Failure (`Fatal `InvalidRenegotiation))
-    | State.Error x -> Some (`Failure x)
+    | `Fail (x, _) -> Some (`Failure x)
 
   in
 

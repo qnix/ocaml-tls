@@ -281,6 +281,9 @@ let rec find_trace (p : trace -> bool) (xs : trace list) =
   | x::xs when p x -> Some x
   | _::xs -> find_trace p xs
 
+let fixup_in_record (hdr : Core.tls_hdr) data =
+  Writer.assemble_any_hdr hdr.Core.version (hdr.Core.content_type, data)
+
 let process_sexp acc x =
   let states = Utils.filter_map
       ~f:(function `StateIn x -> Some x | `StateOut x -> Some x | `State x -> Some x | _ -> None)
