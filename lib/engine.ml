@@ -330,9 +330,9 @@ let handle_change_cipher_spec = function
   | Client cs -> Handshake_client.handle_change_cipher_spec cs
   | Server ss -> Handshake_server.handle_change_cipher_spec ss
 
-and handle_handshake valid = function
+and handle_handshake choices = function
   | Client cs -> Handshake_client.handle_handshake cs
-  | Server ss -> Handshake_server.handle_handshake valid ss
+  | Server ss -> Handshake_server.handle_handshake choices ss
 
 let non_empty cs =
   if Cstruct.len cs = 0 then None else Some cs
@@ -375,12 +375,7 @@ let handle_packet hs buf valid = function
 type err = [ `No_err | `Eof | `Alert of Packet.alert_type ]
 
 (* the main thingy *)
-let handle_raw_record ?valid state (hdr, buf as record : raw_record) =
-
-  let valid = match valid with
-    | None -> empty_valid ()
-    | Some x -> x
-  in
+let handle_raw_record choices state (hdr, buf as record : raw_record) =
 
   Tracing.sexpf ~tag:"record-in" ~f:sexp_of_raw_record record ;
 
@@ -394,7 +389,7 @@ let handle_raw_record ?valid state (hdr, buf as record : raw_record) =
   >>= fun () ->
   decrypt version state.decryptor hdr.content_type buf
   >>= fun (dec_st, dec) ->
-  handle_packet state.handshake dec valid hdr.content_type
+  handle_packet state.handshake dec choices hdr.content_type
   >|= fun (handshake, items, data, dec_cmd, err) ->
   let (encryptor, encs) =
     List.fold_left (fun (st, es) -> function
@@ -424,14 +419,19 @@ let assemble_records (version : tls_version) : record list -> Cstruct.t =
   o Cs.appends @@ List.map @@ Writer.assemble_hdr version
 
 (* main entry point *)
-let handle_tls ?valid state buf =
+let handle_tls ?choices state buf =
+
+  let choices = match choices with
+    | None -> Handshake_common.implementation_choices state.handshake.config
+    | Some x -> x
+  in
 
   (* Tracing.sexpf ~tag:"state-in" ~f:sexp_of_state state ; *)
 
   let rec handle_records st = function
     | []    -> return (st, [], None, `No_err)
     | r::rs ->
-        handle_raw_record st r >>= function
+        handle_raw_record choices st r >>= function
           | (st, raw_rs, data, `No_err) ->
               handle_records st rs >|= fun (st', raw_rs', data', err') ->
                 (st', raw_rs @ raw_rs', maybe_app data data', err')

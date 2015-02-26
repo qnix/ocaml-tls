@@ -305,7 +305,7 @@ let analyse_alerts hashtbl =
       | Reader.Or_error.Ok (ClientHello ch) -> ch
       | _ -> assert false
     in
-    match Engine.handle_raw_record in_state ch with
+    match Engine.handle_raw_record (Handshake_common.implementation_choices config) in_state ch with
     | State.Ok (st, out, app, err) ->
       let ch = extract_ch ch in
       if List.exists null_cs ch.Core.ciphersuites then

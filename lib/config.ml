@@ -83,6 +83,8 @@ let default_config = {
   own_certificates  = `None ;
 }
 
+let default_dh_group = Dh.Group.oakley_2
+
 let invalid msg = invalid_arg ("Tls.Config: invalid configuration: " ^ msg)
 
 let validate_common config =

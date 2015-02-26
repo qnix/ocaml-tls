@@ -57,6 +57,9 @@ val min_dh_size : int
 (** [min_rsa_key_size] is minimal RSA modulus key size in bits (currently 1024) *)
 val min_rsa_key_size : int
 
+(** [default_dh_group] is the default diffie hellman group (currently oakley2) *)
+val default_dh_group : Dh.group
+
 (** opaque type of a client configuration *)
 type client with sexp
 

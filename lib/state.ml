@@ -222,13 +222,10 @@ type failure = [
 (* Monadic control-flow core. *)
 include Control.Or_error_make (struct type err = failure end)
 
-type validate = {
-  version : tls_version option ;
-  cipher  : Ciphersuite.ciphersuite option ;
-  server_random : Cstruct.t option ;
-  dh_sent : (dh_sent * Cstruct.t) option ;
-  session_id : Cstruct.t option ;
+type choices = {
+  version    : tls_any_version -> tls_version or_error ;
+  cipher     : Packet.any_ciphersuite list -> Ciphersuite.ciphersuite or_error ;
+  random     : unit -> Cstruct.t ;
+  dh_secret  : unit -> (Dh.group * Dh.secret * Cstruct.t) option ;
+  session_id : unit -> Cstruct.t option ;
 }
-
-let empty_valid _ =
-  { version = None ; cipher = None ; server_random = None ; dh_sent = None ; session_id = None }

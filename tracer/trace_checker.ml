@@ -60,7 +60,8 @@ let find_dh_sent (trace : trace list) =
   | Some (`StateOut st) ->
     ( match st.State.handshake.State.machina with
       | State.Server (State.AwaitClientKeyExchange_DHE_RSA (_, dh_sent, _)) ->
-        Some (dh_sent, public_of_secret dh_sent)
+        let group, secret = dh_sent in
+        Some (group, secret, public_of_secret dh_sent)
       | _ -> None )
   | _ -> None
 
@@ -71,23 +72,47 @@ let fixup_pack (hdr : Core.tls_hdr) data =
   | None -> assert false
 
 
+(* configured is the range (min, max) -- chosen is the one from server hello -- requested the one from client hello  *)
+(* sanity: min >= chosen >= max ; requested >= chosen *)
+let version_agreed configured chosen requested =
+  match Handshake_common.supported_protocol_version configured (Supported chosen) with
+  | None -> State.fail (`Error (`NoConfiguredVersion chosen))
+  | Some _ ->
+    if Core.version_ge requested chosen then
+      State.return chosen
+    else
+      State.fail (`Error (`NoConfiguredVersion chosen))
+
+(* again, chosen better be part of configured -- and also chosen be a mem of requested *)
+(* this is slightly weak -- depending on sni / certificate we have to limit the decision *)
+let cipher_agreed _certificates configured chosen requested =
+  if List.mem chosen configured &&
+     List.mem chosen (Utils.filter_map ~f:Ciphersuite.any_ciphersuite_to_ciphersuite requested)
+  then
+    State.return chosen
+  else
+    State.fail (`Error (`NoConfiguredCiphersuite [chosen]))
+
 let fixup_initial_state state raw next =
   let server_hello = parse_server_hello raw in
   let dh_sent = match Ciphersuite.ciphersuite_kex server_hello.Core.ciphersuites with
     | Ciphersuite.RSA -> None
     | Ciphersuite.DHE_RSA -> find_dh_sent next
   in
-  let valid = State.{ version = Some server_hello.Core.version ;
-                      cipher = Some server_hello.Core.ciphersuites ;
-                      server_random = Some server_hello.Core.random ;
-                      session_id = server_hello.Core.sessionid ;
-                      dh_sent } in
   let config = {
     state.State.handshake.State.config with
     own_certificates = `Single (cert, priv)
   } in
+  let choices = State.{
+      version = version_agreed config.protocol_versions server_hello.Core.version ;
+      cipher = cipher_agreed config.own_certificates config.ciphers server_hello.Core.ciphersuites ;
+      random = (fun () -> server_hello.Core.random) ;
+      session_id = (fun () -> server_hello.Core.sessionid) ;
+      dh_secret = (fun () -> dh_sent)
+    }
+  in
   let handshake = { state.State.handshake with config } in
-  (valid, { state with handshake })
+  (choices, { state with handshake })
 
 
 (* what we should do: *)
@@ -98,7 +123,7 @@ let fixup_initial_state state raw next =
 (*   when an output comes along: check that it matches the first item *)
 (*   check invariants -- at the end out should be empty *)
 
-let rec replay ?valid state = function
+let rec replay ?choices state = function
   | (`RecordIn (hdr, data))::xs ->
     Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
     ( match hdr.Core.content_type with
@@ -107,21 +132,24 @@ let rec replay ?valid state = function
         begin
           let out_raw = find_hs_out xs in
           assert (Cstruct.get_uint8 out_raw 0 = 2) ;
-          let valid, state = fixup_initial_state state out_raw xs in
-          match Engine.handle_raw_record ~valid state (hdr, data) with
+          let choices, state = fixup_initial_state state out_raw xs in
+          match Engine.handle_raw_record choices state (hdr, data) with
           | State.Ok (state', out, data, err) ->
             assert (data = None) ;
             assert (err = `No_err) ;
             ( match out with
               | [] -> Printf.printf "out is empty!?\n"
               | (_, fst_out')::_ ->
-                assert (Uncommon.Cs.equal out_raw fst_out') ;
+                if not (Uncommon.Cs.equal out_raw fst_out') then
+                  (Printf.printf "out_raw" ; Cstruct.hexdump out_raw ;
+                   Printf.printf "fst_out'" ; Cstruct.hexdump fst_out' ;
+                   assert false) ;
                 Printf.printf "first handshake out is the same!\n" ;
-                replay ~valid state' xs )
+                replay ~choices state' xs )
           | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
         end
       | _ ->
-        ( match Engine.handle_tls ?valid state (fixup_pack hdr data) with
+        ( match Engine.handle_tls ?choices state (fixup_pack hdr data) with
           | `Ok (st, `Response res, `Data dat) ->
             (match dat with
              | None -> ()
@@ -136,11 +164,11 @@ let rec replay ?valid state = function
                        Printf.printf "out" ; Cstruct.hexdump out ) ;
                     assert (Uncommon.Cs.equal raw_out out) ;
                     Printf.printf "handshake out is the same!\n" ;
-                    replay ?valid state' xs
+                    replay ?choices state' xs
                   | None -> Printf.printf "expected a next output!\n" )
               | `Ok state', None ->
                 Printf.printf "no out generated!\n" ;
-                replay ?valid state' xs
+                replay ?choices state' xs
               | `Alert al, _ ->
                 Printf.printf "received alerttt %s\n" (Packet.alert_type_to_string al)
             )
