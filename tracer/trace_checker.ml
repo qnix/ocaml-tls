@@ -106,7 +106,7 @@ let fixup_initial_state state raw next =
     }
   in
   let handshake = { state.State.handshake with config } in
-  (choices, { state with handshake })
+  (choices, server_hello.Core.version, { state with handshake })
 
 
 (* what we should do: *)
@@ -126,21 +126,25 @@ let rec replay ?choices state = function
         begin
           let out_raw = find_hs_out xs in
           assert (Cstruct.get_uint8 out_raw 0 = 2) ;
-          let choices, state = fixup_initial_state state out_raw xs in
-          match Engine.handle_raw_record choices state (hdr, data) with
-          | State.Ok (state', out, data, err) ->
+          let choices, version, state = fixup_initial_state state out_raw xs in
+          match Engine.handle_tls ~choices state (fixup_in_record hdr data) with
+          | `Ok (`Ok state', `Response out, `Data data) ->
             assert (data = None) ;
-            assert (err = `No_err) ;
             ( match out with
-              | [] -> Printf.printf "out is empty!?\n"
-              | (_, fst_out')::_ ->
-                if not (Uncommon.Cs.equal out_raw fst_out') then
-                  (Printf.printf "out_raw" ; Cstruct.hexdump out_raw ;
+              | None -> Printf.printf "out is empty!?\n"
+              | Some fst_out' ->
+                let raw_out =
+                  fixup_in_record
+                    { Core.content_type = Packet.HANDSHAKE ; Core.version = Core.Supported version }
+                    out_raw
+                in
+                if not (Uncommon.Cs.equal raw_out fst_out') then
+                  (Printf.printf "raw_out" ; Cstruct.hexdump raw_out ;
                    Printf.printf "fst_out'" ; Cstruct.hexdump fst_out' ;
                    assert false) ;
                 Printf.printf "first handshake out is the same!\n" ;
                 replay ~choices state' xs )
-          | State.Error e -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+          | `Fail (e, _) -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
         end
       | _ ->
         ( match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
