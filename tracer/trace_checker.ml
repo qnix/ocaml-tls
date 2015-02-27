@@ -109,15 +109,40 @@ let fixup_initial_state state raw next =
   (choices, server_hello.Core.version, { state with handshake })
 
 
+let normalise data =
+  match Engine.separate_records data with
+  | State.Ok (xs, rest) ->
+    assert (Cstruct.len rest = 0) ;
+    List.map (fun (a, b) -> fixup_in_record a b) xs
+  | _ -> assert false
+
 (* what we should do: *)
 (* hello extension normaliser / equivalence -- we might want to pass extension types *)
-(* ensure that each RecordOut is normalised! *)
-(*   pass through the pending output records *)
-(*   when an input comes along: append outputs to pending outputs! *)
-(*   when an output comes along: check that it matches the first item *)
-(*   check invariants -- at the end out should be empty *)
+(* what happens if handle didn't produce an output, but record-out came along? --
+     need a way to passthrough / match these as well! *)
+(* also, alerts/failure traces *)
+(* more intricate problem: cbc + TLS_1_1/1_2: random_iv, use IV it from the trace --
+     but this and fragmentation is the horror [tm] (decrypt + normalise + compare?) *)
+(* while separate records is a good start, we need separate handshake here as well! *)
+let rec replay ?choices state pending_out t =
+  let handle_and_rec ?choices state hdr data xs =
+    match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
+    | `Ok (`Ok state', `Response out, `Data data) ->
+      ( match data with
+        | None -> ()
+        | Some x -> Printf.printf "received data %s\n" (Cstruct.to_string x) ) ;
+      let pending = match out with
+        | None -> Printf.printf "empty out!?\n" ; pending_out
+        | Some out -> pending_out @ normalise out
+      in
+      replay ?choices state' pending xs
+    | `Fail (e, _) ->
+      (* in the trace we better have an alert as well! *)
+      Printf.printf "sth failed %s\n"
+        (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+  in
 
-let rec replay ?choices state = function
+  match t with
   | (`RecordIn (hdr, data))::xs ->
     Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
     ( match hdr.Core.content_type with
@@ -127,55 +152,32 @@ let rec replay ?choices state = function
           let out_raw = find_hs_out xs in
           assert (Cstruct.get_uint8 out_raw 0 = 2) ;
           let choices, version, state = fixup_initial_state state out_raw xs in
-          match Engine.handle_tls ~choices state (fixup_in_record hdr data) with
-          | `Ok (`Ok state', `Response out, `Data data) ->
-            assert (data = None) ;
-            ( match out with
-              | None -> Printf.printf "out is empty!?\n"
-              | Some fst_out' ->
-                let raw_out =
-                  fixup_in_record
-                    { Core.content_type = Packet.HANDSHAKE ; Core.version = Core.Supported version }
-                    out_raw
-                in
-                if not (Uncommon.Cs.equal raw_out fst_out') then
-                  (Printf.printf "raw_out" ; Cstruct.hexdump raw_out ;
-                   Printf.printf "fst_out'" ; Cstruct.hexdump fst_out' ;
-                   assert false) ;
-                Printf.printf "first handshake out is the same!\n" ;
-                replay ~choices state' xs )
-          | `Fail (e, _) -> Printf.printf "sth failed %s\n" (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+          handle_and_rec ~choices state hdr data xs
         end
-      | _ ->
-        ( match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
-          | `Ok (st, `Response res, `Data dat) ->
-            (match dat with
-             | None -> ()
-             | Some x -> Printf.printf "received: %s\n" (Cstruct.to_string x)) ;
-            ( match st, res with
-              | `Ok state', Some out ->
-                ( match find_out xs with
-                  | Some (t, out_raw) ->
-                    let raw_out = fixup_in_record { hdr with Core.content_type = t } out_raw in
-                    if not (Uncommon.Cs.equal raw_out out) then
-                      (Printf.printf "raw_out" ; Cstruct.hexdump raw_out ;
-                       Printf.printf "out" ; Cstruct.hexdump out ) ;
-                    assert (Uncommon.Cs.equal raw_out out) ;
-                    Printf.printf "handshake out is the same!\n" ;
-                    replay ?choices state' xs
-                  | None -> Printf.printf "expected a next output!\n" )
-              | `Ok state', None ->
-                Printf.printf "no out generated!\n" ;
-                replay ?choices state' xs
-              | `Alert al, _ ->
-                Printf.printf "received alerttt %s\n" (Packet.alert_type_to_string al)
-            )
-          | `Fail _ -> Printf.printf "failed\n" )
-    )
+      | _ -> handle_and_rec ?choices state hdr data xs )
+  | (`RecordOut (t, data))::xs ->
+    let rec cmp_data expected rcvd =
+      match expected, rcvd with
+      | [], [] -> []
+      | [], _ -> assert false
+      | x::xs, y::ys ->
+        Printf.printf "comparing out %d vs %d\n" (Cstruct.len x) (Cstruct.len y) ;
+        if not (Nocrypto.Uncommon.Cs.equal x y) then
+          (Printf.printf "mismatch!" ; Cstruct.hexdump x ; Printf.printf "y" ; Cstruct.hexdump y ;
+           assert false) ;
+        cmp_data xs ys
+      | xs, [] -> xs
+    in
+    let version = state.handshake.protocol_version in
+    let data = Writer.assemble_hdr version (t, data) in
+    let leftover = cmp_data pending_out (normalise data) in
+    replay ?choices state leftover xs
   | (`AlertIn alert_in)::_ -> Printf.printf "received alert %s\n" (Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert alert_in))
   | (`AlertOut alert_out)::_ -> Printf.printf "sending alert %s\n" (Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert alert_out))
-  | _::xs -> replay state xs
-  | [] -> Printf.printf "sucess!\n"
+  | _::xs -> replay ?choices state pending_out xs
+  | [] ->
+    assert (List.length pending_out = 0) ;
+    Printf.printf "sucess!\n"
     (* should do sth useful with state.. *)
 
 let rec mix c s =
@@ -206,7 +208,7 @@ let reconstruct =
   (state, trace)
 
 let run dir file pcap =
-  Nocrypto.Rng.reseed (Cstruct.create 10);
+  Nocrypto.Rng.reseed (Cstruct.create 1);
   match dir, file, pcap with
   | Some dir, _, _ ->
     Printf.printf "not yet implemented\n"
@@ -216,10 +218,10 @@ let run dir file pcap =
       | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
       | None ->
         let state = init trace in
-        replay state trace)
+        replay state [] trace)
   | None, None, Some _ ->
     let state, trace = reconstruct in
-    replay state trace
+    replay state [] trace
   | _ -> assert false
 
 let trace_dir = ref None

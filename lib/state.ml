@@ -224,7 +224,7 @@ include Control.Or_error_make (struct type err = failure end)
 
 type choices = {
   version    : tls_any_version -> tls_version or_error ;
-  cipher     : Packet.any_ciphersuite list -> Ciphersuite.ciphersuite or_error ;
+  cipher     : Packet.any_ciphersuite list -> Ciphersuite.ciphersuite or_error ; (* should be: string option -> cs list -> (cipher * cert list * priv) or_error *)
   random     : unit -> Cstruct.t ;
   dh_secret  : unit -> (Dh.group * Dh.secret * Cstruct.t) option ;
   session_id : unit -> Cstruct.t option ;
