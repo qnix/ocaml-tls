@@ -80,6 +80,8 @@ val handle_tls : ?choices:State.choices -> state -> Cstruct.t -> ret
 
 val separate_records : Cstruct.t ->  ((Core.tls_hdr * Cstruct.t) list * Cstruct.t) State.t
 
+val separate_handshakes : Cstruct.t ->  (Cstruct.t list * Cstruct.t) State.t
+
 (** [can_handle_appdata tls] is a predicate which indicates when the connection has already completed a handshake *)
 val can_handle_appdata    : state -> bool
 

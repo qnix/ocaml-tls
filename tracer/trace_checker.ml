@@ -124,6 +124,7 @@ let normalise data =
 (* more intricate problem: cbc + TLS_1_1/1_2: random_iv, use IV it from the trace --
      but this and fragmentation is the horror [tm] (decrypt + normalise + compare?) *)
 (* while separate records is a good start, we need separate handshake here as well! *)
+(* padding! *)
 let rec replay ?choices state pending_out t =
   let handle_and_rec ?choices state hdr data xs =
     match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
