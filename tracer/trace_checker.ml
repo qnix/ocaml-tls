@@ -109,11 +109,30 @@ let fixup_initial_state state raw next =
   (choices, server_hello.Core.version, { state with handshake })
 
 
-let normalise data =
+let dbg_cc c = Printf.printf "cc %s\n" (Sexplib.Sexp.to_string_hum (State.sexp_of_crypto_state c))
+
+let normalise state data =
   match Engine.separate_records data with
   | State.Ok (xs, rest) ->
     assert (Cstruct.len rest = 0) ;
-    List.map (fun (a, b) -> fixup_in_record a b) xs
+    let ver = state.State.handshake.State.protocol_version in
+    (* Printf.printf "now trying to decrypt %d packets\n" (List.length xs); *)
+    let e, acc = List.fold_left (fun (enc, acc) (hdr, data) ->
+        (* dbg_cc enc; *)
+        match Engine.decrypt ver enc hdr.Core.content_type data with
+        | State.Ok (enc, d) ->
+          (* Printf.printf "dec is %d\n" (Cstruct.len d); *)
+          (enc, d :: acc)
+        | State.Error e ->
+          if hdr.Core.content_type == Packet.CHANGE_CIPHER_SPEC && Cstruct.len data = 1 then
+            (enc, data :: acc)
+          else
+            (Printf.printf "dec failed %s\n"
+              (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e));
+             assert false))
+        (state.State.encryptor, []) xs
+    in
+    (List.rev acc, e)
   | _ -> assert false
 
 (* what we should do: *)
@@ -121,11 +140,10 @@ let normalise data =
 (* what happens if handle didn't produce an output, but record-out came along? --
      need a way to passthrough / match these as well! *)
 (* also, alerts/failure traces *)
-(* more intricate problem: cbc + TLS_1_1/1_2: random_iv, use IV it from the trace --
-     but this and fragmentation is the horror [tm] (decrypt + normalise + compare?) *)
 (* while separate records is a good start, we need separate handshake here as well! *)
-(* padding! *)
-let rec replay ?choices state pending_out t =
+(* eaf3996a47b6fcf2 has reneg! *)
+(* reneg + structural equality, rather than byte equality! *)
+let rec replay ?choices prev_state state pending_out t =
   let handle_and_rec ?choices state hdr data xs =
     match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
     | `Ok (`Ok state', `Response out, `Data data) ->
@@ -133,14 +151,22 @@ let rec replay ?choices state pending_out t =
         | None -> ()
         | Some x -> Printf.printf "received data %s\n" (Cstruct.to_string x) ) ;
       let pending = match out with
-        | None -> Printf.printf "empty out!?\n" ; pending_out
-        | Some out -> pending_out @ normalise out
+        | None -> (* Printf.printf "empty out!?\n"; *) pending_out
+        | Some out ->
+          (* Printf.printf "output from handle_tls, normalising\n" ; *)
+          let data, _ = normalise state out in
+          pending_out @ data
       in
-      replay ?choices state' pending xs
+      let prev = match hdr.Core.content_type with
+        | Packet.CHANGE_CIPHER_SPEC -> state'
+        | _ -> prev_state
+      in
+      replay ?choices prev state' pending xs
     | `Fail (e, _) ->
       (* in the trace we better have an alert as well! *)
       Printf.printf "sth failed %s\n"
-        (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e))
+        (Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure e)) ;
+      assert false
   in
 
   match t with
@@ -162,7 +188,7 @@ let rec replay ?choices state pending_out t =
       | [], [] -> []
       | [], _ -> assert false
       | x::xs, y::ys ->
-        Printf.printf "comparing out %d vs %d\n" (Cstruct.len x) (Cstruct.len y) ;
+        (* Printf.printf "comparing out %d vs %d\n" (Cstruct.len x) (Cstruct.len y) ; *)
         if not (Nocrypto.Uncommon.Cs.equal x y) then
           (Printf.printf "mismatch!" ; Cstruct.hexdump x ; Printf.printf "y" ; Cstruct.hexdump y ;
            assert false) ;
@@ -171,11 +197,13 @@ let rec replay ?choices state pending_out t =
     in
     let version = state.handshake.protocol_version in
     let data = Writer.assemble_hdr version (t, data) in
-    let leftover = cmp_data pending_out (normalise data) in
-    replay ?choices state leftover xs
+    (* Printf.printf "record out, normalising\n" ; *)
+    let data, e = normalise prev_state data in
+    let leftover = cmp_data pending_out data in
+    replay ?choices { prev_state with State.encryptor = e } state leftover xs
   | (`AlertIn alert_in)::_ -> Printf.printf "received alert %s\n" (Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert alert_in))
   | (`AlertOut alert_out)::_ -> Printf.printf "sending alert %s\n" (Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert alert_out))
-  | _::xs -> replay ?choices state pending_out xs
+  | _::xs -> replay ?choices prev_state state pending_out xs
   | [] ->
     assert (List.length pending_out = 0) ;
     Printf.printf "sucess!\n"
@@ -208,21 +236,30 @@ let reconstruct =
   let state = Engine.server config in
   (state, trace)
 
+let doit (name, (ts, (alert, trace))) =
+  match alert with
+  | None ->
+    Printf.printf "file %s: " name;
+    let state = init trace in
+    replay state state [] trace
+  | Some _ -> ()
+
 let run dir file pcap =
   Nocrypto.Rng.reseed (Cstruct.create 1);
   match dir, file, pcap with
   | Some dir, _, _ ->
-    Printf.printf "not yet implemented\n"
+    let success, fail, skip = load_dir dir in
+    List.iter doit success
   | None, Some file, _ ->
     let ts, (alert, trace) = load file in
     ( match alert with
       | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
       | None ->
         let state = init trace in
-        replay state [] trace)
+        replay state state [] trace)
   | None, None, Some _ ->
     let state, trace = reconstruct in
-    replay state [] trace
+    replay state state [] trace
   | _ -> assert false
 
 let trace_dir = ref None

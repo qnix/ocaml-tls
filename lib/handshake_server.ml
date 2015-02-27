@@ -327,7 +327,7 @@ let answer_client_hello_reneg choices state (ch : client_hello) raw =
 
   let process_client_hello config oldversion ours ch =
     guard (client_hello_valid ch) (`Fatal `InvalidClientHello) >>= fun () ->
-    agreed_version config.protocol_versions ch.version >>= fun version ->
+    choices.version ch.version >>= fun version ->
     guard (version = oldversion) (`Fatal (`InvalidRenegotiationVersion version)) >>= fun () ->
     let theirs = get_secure_renegotiation ch.extensions in
     ensure_reneg config.secure_reneg ours theirs >|= fun () ->

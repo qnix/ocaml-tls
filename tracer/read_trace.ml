@@ -400,8 +400,9 @@ let load_dir dir =
   let suc = ref []
   and fai = ref []
   and skip = ref []
+  and i = ref 1
   in
-  while not (!filen = None) do
+  while !i < 100 && not (!filen = None) do
     let Some filename = !filen in
     (try
        let trace = load (Filename.concat dir filename) in
@@ -409,6 +410,7 @@ let load_dir dir =
      with
      | Trace_error e -> fai := (filename, e) :: !fai
      | e -> Printf.printf "problem with file %s, skipping\n%!" filename; skip := filename :: !skip) ;
-    filen := try Some (Unix.readdir dirent) with End_of_file -> None
+    (filen := try Some (Unix.readdir dirent) with End_of_file -> None) ;
+    i := succ !i
   done ;
   (!suc, !fai, !skip)
