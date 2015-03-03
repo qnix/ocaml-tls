@@ -2,6 +2,15 @@ open Read_trace
 
 open Tls
 
+(* why this is all so hackish:
+  - incomplete traces (hopping sequence numbers of incoming records (after 1 comes 120))
+  - incomplete persistency of stream ciphers (we cannot do much after the first handshake)
+  - out of order events: state-in; record-in; state-out; record-out
+  - fragmentation on both levels: record and handshake
+  - incomplete traces (such as "()")
+  - traces where version in first handshake is not the same as the one in the upcoming (70edd70bfe97ce96 is a great example of this) -- occurs when searching for the next server hello to fill the choices
+ *)
+
 let cs_mmap file =
   Unix_cstruct.of_fd Unix.(openfile file [O_RDONLY] 0)
 
@@ -34,10 +43,19 @@ let find_out ?packet (trace : trace list) =
   | Some (`RecordOut r) -> Some r
   | _ -> None
 
-let find_hs_out t =
-  match find_out ~packet:Packet.HANDSHAKE t with
-  | Some p -> p
-  | _ -> assert false
+let find_hs_out dec ver t =
+  if
+    (dec = None) ||
+    (try (
+       let sout = List.find (function `StateOut _ -> true | _ -> false) t in
+       match sout with
+       | `StateOut sout -> ver = sout.State.handshake.State.protocol_version
+       | _ -> true)
+     with Not_found -> true)
+  then
+    find_out ~packet:Packet.HANDSHAKE t
+  else
+    None
 
 let parse_server_hello out =
   let buflen = Reader.parse_handshake_length out in
@@ -115,52 +133,159 @@ let dbg_al al = Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert al)
 
 let dbg_fail f = Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure f)
 
+let check_stream = function
+  | None -> false
+  | Some x -> match x.State.cipher_st with
+    | State.Stream _ -> true
+    | _ -> false
+
 let normalise crypt ver data =
   match Engine.separate_records data with
   | State.Ok (xs, rest) ->
     assert (Cstruct.len rest = 0) ;
     (* Printf.printf "now trying to decrypt %d packets\n" (List.length xs) ; *)
     let e, acc = List.fold_left (fun (enc, acc) (hdr, data) ->
-        (* dbg_cc enc; Cstruct.hexdump data ; *)
+        (* dbg_cc enc; (* Cstruct.hexdump data ; *) *)
         match Engine.decrypt ver enc hdr.Core.content_type data with
         | State.Ok (enc, d) ->
           (* Printf.printf "dec is %d\n" (Cstruct.len d) ; *)
-          (enc, d :: acc)
+          (enc, (hdr, d) :: acc)
         | State.Error e ->
           if hdr.Core.content_type == Packet.CHANGE_CIPHER_SPEC (* && Cstruct.len data = 1 *) then
             (* we're a bit unlucky, but let's pretend to be good *)
             let ccs = Writer.assemble_change_cipher_spec in
-            (enc, ccs :: acc)
+            (enc, (hdr, ccs) :: acc)
           else
             (Printf.printf "dec failed %s\n" (dbg_fail e) ;
+             Cstruct.hexdump data ;
              assert false))
         (crypt, []) xs
     in
     (List.rev acc, e)
   | _ -> assert false
 
+(* am I really bold enough to define equality? *)
+let rec exts_eq a b =
+  let open Core in
+  match a with
+  | [] -> true
+  | x::xs ->
+    exts_eq xs b &&
+    match x with
+    | Hostname s ->
+      ( try (match List.find (function Hostname _ -> true | _ -> false) b, s with
+            | Hostname None, None -> true
+            | Hostname (Some x), Some y when x = y -> true
+            | _ -> false
+          ) with Not_found -> false )
+    | MaxFragmentLength mfl ->
+      ( try (match List.find (function MaxFragmentLength _ -> true | _ -> false) b, mfl with
+            | MaxFragmentLength x, y when x = y -> true
+            | _ -> false
+          ) with Not_found -> false )
+    | EllipticCurves ncs ->
+      ( try (match List.find (function EllipticCurves _ -> true | _ -> false) b with
+            | EllipticCurves x -> List.for_all (fun ec -> List.mem ec x) ncs
+            | _ -> false
+          ) with Not_found -> false )
+    | ECPointFormats ecp ->
+      ( try (match List.find (function ECPointFormats _ -> true | _ -> false) b with
+            | ECPointFormats x -> List.for_all (fun ec -> List.mem ec x) ecp
+            | _ -> false
+          ) with Not_found -> false )
+    | SecureRenegotiation sn -> (* actually, if sn empty might also be ciphersuite! *)
+      ( try (match List.find (function SecureRenegotiation _ -> true | _ -> false) b with
+            | SecureRenegotiation sn' -> Nocrypto.Uncommon.Cs.equal sn sn'
+            | _ -> false
+          ) with Not_found -> false )
+    | Padding _ -> true
+    | SignatureAlgorithms hs ->
+      ( try (match List.find (function SignatureAlgorithms _ -> true | _ -> false) b with
+            | SignatureAlgorithms hs' -> List.for_all (fun hs -> List.mem hs hs') hs
+            | _ -> false
+          ) with Not_found -> false )
+    | UnknownExtension (num, data) ->
+      ( try (match List.find (function UnknownExtension (x, _) when x = num -> true | _ -> false) b with
+            | UnknownExtension (_, data') -> Nocrypto.Uncommon.Cs.equal data data'
+            | _ -> false
+          ) with Not_found -> false )
+
+let hello_eq (a : ('a, 'b) Core.hello) (b : ('a, 'b) Core.hello) cs_cmp =
+  let open Core in
+  let cs_eq = Nocrypto.Uncommon.Cs.equal in
+  a.version = b.version &&
+  cs_eq a.random b.random &&
+  (match a.sessionid, b.sessionid with
+   | None, None -> true
+   | Some a, Some b -> cs_eq a b
+   | _ -> false) &&
+  cs_cmp a.ciphersuites b.ciphersuites &&
+  exts_eq a.extensions b.extensions
+
+let handshake_equal a b =
+  let open Core in
+  let cs_eq = Nocrypto.Uncommon.Cs.equal in
+  match a, b with
+  | HelloRequest, HelloRequest -> true
+  | ServerHelloDone, ServerHelloDone -> true
+  | ClientHello ch, ClientHello ch' -> hello_eq ch ch' (fun a b -> List.for_all (fun c -> List.mem c b) a)
+  | ServerHello sh, ServerHello sh' -> hello_eq sh sh' (fun a b -> a = b)
+  | Certificate c, Certificate c' -> List.for_all (fun (a, b) -> cs_eq a b) (List.combine c c')
+  | ServerKeyExchange skex, ServerKeyExchange skex' -> cs_eq skex skex'
+  | CertificateRequest cr, CertificateRequest cr' -> cs_eq cr cr' (* should do modulo CA list *)
+  | ClientKeyExchange ckex, ClientKeyExchange ckex' -> cs_eq ckex ckex'
+  | CertificateVerify cv, CertificateVerify cv' -> cs_eq cv cv'
+  | Finished f, Finished f' -> cs_eq f f'
+  | _ -> false
+
+let record_equal (ahdr, adata) (bhdr, bdata) =
+  Printf.printf "comparing %s with %s\n"
+    (Packet.content_type_to_string ahdr.Core.content_type)
+    (Packet.content_type_to_string bhdr.Core.content_type) ;
+  match ahdr.Core.content_type, bhdr.Core.content_type with
+  | Packet.CHANGE_CIPHER_SPEC, Packet.CHANGE_CIPHER_SPEC -> true
+  | Packet.ALERT, Packet.ALERT -> true (* since we hangup after alert anyways *)
+  | Packet.HANDSHAKE, Packet.HANDSHAKE ->
+    ( match Engine.separate_handshakes adata, Engine.separate_handshakes bdata with
+      | State.Ok (ahs, arest), State.Ok (bhs, brest) when
+          (Cstruct.len arest = 0) && (Cstruct.len brest = 0) ->
+        let cmp1 (a, b) =
+          match Reader.parse_handshake a, Reader.parse_handshake b with
+          | Reader.Or_error.Ok a, Reader.Or_error.Ok b -> handshake_equal a b
+          | _ -> false
+        in
+        List.for_all cmp1 (List.combine ahs bhs)
+      | _ -> false )
+    | Packet.APPLICATION_DATA, Packet.APPLICATION_DATA -> true (* why should I bother about payload? *)
+  | _ -> false
+
 (* what we should do: *)
 (* hello extension normaliser / equivalence -- we might want to pass extension types *)
 (* what happens if handle didn't produce an output, but record-out came along? --
      need a way to passthrough / match these as well! *)
 (* also, alerts/failure traces *)
-(* while separate records is a good start, we need separate handshake here as well! *)
 (* eaf3996a47b6fcf2 has reneg! *)
-(* structural equality, rather than byte equality! *)
 let rec replay ?choices prev_state state pending_out t =
   let handle_and_rec ?choices state hdr data xs =
+    (* Printf.printf "now handling...\n" ; dbg_cc state.State.decryptor ; *)
     match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
     | `Ok (`Ok state', `Response out, `Data data) ->
-      ( match data with
-        | None -> ()
-        | Some x -> Printf.printf "received data %s\n" (Cstruct.to_string x) ) ;
       let pending = match out with
         | None -> (* Printf.printf "empty out!?\n"; *) pending_out
         | Some out ->
-          Printf.printf "output from handle_tls, normalising\n" ;
+          (* Printf.printf "output from handle_tls, normalising\n" ; *)
           let ver = state.State.handshake.State.protocol_version in
           let data, _ = normalise state.encryptor ver out in
           pending_out @ data
+      in
+      let xs, pending = match data with
+        | None -> (xs, pending)
+        | Some x ->
+          Printf.printf "received data %s\n" (Cstruct.to_string x);
+          if check_stream state.encryptor then
+            ([], [])
+          else
+            (xs, pending)
       in
       let prev = match hdr.Core.content_type with
         | Packet.CHANGE_CIPHER_SPEC -> state'
@@ -170,53 +295,69 @@ let rec replay ?choices prev_state state pending_out t =
     | `Fail (e, _) ->
       (* in the trace we better have an alert as well! *)
       Printf.printf "sth failed %s\n" (dbg_fail e) ;
-      assert false
   in
 
   match t with
   | (`RecordIn (hdr, data))::xs ->
-    Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
+    (* Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ; *)
     ( match hdr.Core.content_type with
       | Packet.HANDSHAKE ->
         let enc = fixup_in_record hdr data in
         let ver = state.State.handshake.State.protocol_version in
+        (* Printf.printf "normalising in record-in to find whether it is a clienthello\n"; *)
         let dec, _ = normalise state.State.decryptor ver enc in
         ( match dec with
-          | x::_ when Cstruct.get_uint8 x 0 = 1->
+          | (_,x)::_ when Cstruct.get_uint8 x 0 = 1->
             (* Printf.printf "decrypted (%d):" (Cstruct.len x) ; Cstruct.hexdump x ; *)
-            let t, out = find_hs_out xs in
-            let out_data = Writer.assemble_hdr ver (t, out) in
-            ( match normalise prev_state.State.encryptor ver out_data with
-              | x::_,_ ->
-                assert (Cstruct.get_uint8 x 0 = 2) ;
-                let choices, version, state = fixup_initial_state state x xs in
-                handle_and_rec ~choices state hdr data xs
-              | _ -> assert false )
+            ( match find_hs_out state.State.decryptor ver xs with
+              | Some (t, out) ->
+                let out_data = Writer.assemble_hdr ver (t, out) in
+                (* Printf.printf "normalising out_data\n" ; *)
+                ( match normalise prev_state.State.encryptor ver out_data with
+                  | (_,x)::_,_ ->
+                    assert (Cstruct.get_uint8 x 0 = 2) ;
+                    let choices, version, state = fixup_initial_state state x xs in
+                    handle_and_rec ~choices state hdr data xs
+                  | _ -> assert false )
+              | None ->
+                if List.length xs < 3 then
+                  Printf.printf "couldn't find handshake out, but trace isn't too long..\n"
+                else
+                  assert false )
           | _ -> handle_and_rec ?choices state hdr data xs )
+      | Packet.ALERT -> Printf.printf "alert in! success\n"
       | _ -> handle_and_rec ?choices state hdr data xs )
   | (`RecordOut (t, data))::xs ->
     let rec cmp_data expected rcvd =
       match expected, rcvd with
       | [], [] -> []
       | [], _ -> assert false
-      | x::xs, y::ys ->
+      | (xh,x)::xs, (yh,y)::ys ->
         (* Printf.printf "comparing out %d vs %d\n" (Cstruct.len x) (Cstruct.len y) ; *)
-        if not (Nocrypto.Uncommon.Cs.equal x y) then
+        (* if not (Nocrypto.Uncommon.Cs.equal x y) then
           (Printf.printf "mismatch! (computed)" ; Cstruct.hexdump x ; Printf.printf "stored" ; Cstruct.hexdump y ;
-           assert false) ;
-        cmp_data xs ys
+           assert false) ; *)
+        if record_equal (xh,x) (yh,y) then
+          cmp_data xs ys
+        else
+          (Printf.printf "mismatched records!\n";
+           assert false)
       | xs, [] -> xs
     in
     let version = state.handshake.protocol_version in
     let data = Writer.assemble_hdr version (t, data) in
-    Printf.printf "record out, normalising\n" ;
+    (* Printf.printf "record out, normalising\n" ; *)
     let ver = state.State.handshake.State.protocol_version in
     let data, e = normalise prev_state.encryptor ver data in
     let leftover = cmp_data pending_out data in
     replay ?choices { prev_state with State.encryptor = e } state leftover xs
   | (`AlertIn alert_in)::_ -> Printf.printf "received alert %s\n" (dbg_al alert_in)
   | (`AlertOut alert_out)::_ -> Printf.printf "sending alert %s\n" (dbg_al alert_out)
-  | (`StateIn s)::xs -> replay ?choices { prev_state with State.encryptor = s.State.encryptor } state pending_out xs
+  | (`StateIn s)::xs ->
+    let enc = if check_stream s.State.encryptor then prev_state.State.encryptor else s.State.encryptor
+    and dec = if check_stream s.State.decryptor then state.State.decryptor else s.State.decryptor
+    in
+    replay ?choices { prev_state with State.encryptor = enc } { state with State.decryptor = dec } pending_out xs
   | _::xs -> replay ?choices prev_state state pending_out xs
   | [] ->
     assert (List.length pending_out = 0) ;
@@ -251,12 +392,13 @@ let reconstruct =
   (state, trace)
 
 let doit (name, (ts, (alert, trace))) =
-  match alert with
-  | None ->
+  match alert, trace with
+  | None, [] -> ()
+  | None, _ ->
     Printf.printf "file %s: " name;
     let state = init trace in
     replay state state [] trace
-  | Some _ -> ()
+  | _ -> ()
 
 let run dir file pcap =
   Nocrypto.Rng.reseed (Cstruct.create 1);

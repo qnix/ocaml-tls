@@ -402,7 +402,7 @@ let load_dir dir =
   and skip = ref []
   and i = ref 1
   in
-  while !i < 100 && not (!filen = None) do
+  while (* !i < 5000 && *) not (!filen = None) do
     let Some filename = !filen in
     (try
        let trace = load (Filename.concat dir filename) in
