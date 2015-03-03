@@ -395,10 +395,8 @@ let run dir file =
         Hashtbl.add failures e [name]
     in
 
-    let success, fail, skip = load_dir dir in
-    Printf.printf "skipped %d\n" (List.length skip) ;
-    List.iter suc success ;
-    List.iter fails fail ;
+    let skip = load_dir dir suc fails in
+    Printf.printf "skipped %d\n" skip ;
 
     Printf.printf "success size %d\n" (Hashtbl.length successes) ;
 (*    Hashtbl.iter (fun k (ts, trace) ->

@@ -5,7 +5,7 @@ open Tls
 (* why this is all so hackish:
   - incomplete traces (hopping sequence numbers of incoming records (after 1 comes 120))
   - incomplete persistency of stream ciphers (we cannot do much after the first handshake)
-  - out of order events: state-in; record-in; state-out; record-out
+  - out of order events: state-in; record-in; state-out; record-out -- crucially: in our recorded state, CCS is already encrypted..
   - fragmentation on both levels: record and handshake
   - incomplete traces (such as "()")
   - traces where version in first handshake is not the same as the one in the upcoming (70edd70bfe97ce96 is a great example of this) -- occurs when searching for the next server hello to fill the choices
@@ -239,9 +239,9 @@ let handshake_equal a b =
   | _ -> false
 
 let record_equal (ahdr, adata) (bhdr, bdata) =
-  Printf.printf "comparing %s with %s\n"
-    (Packet.content_type_to_string ahdr.Core.content_type)
-    (Packet.content_type_to_string bhdr.Core.content_type) ;
+  (* Printf.printf "comparing %s with %s\n"
+     (Packet.content_type_to_string ahdr.Core.content_type)
+     (Packet.content_type_to_string bhdr.Core.content_type) ; *)
   match ahdr.Core.content_type, bhdr.Core.content_type with
   | Packet.CHANGE_CIPHER_SPEC, Packet.CHANGE_CIPHER_SPEC -> true
   | Packet.ALERT, Packet.ALERT -> true (* since we hangup after alert anyways *)
@@ -256,16 +256,27 @@ let record_equal (ahdr, adata) (bhdr, bdata) =
         in
         List.for_all cmp1 (List.combine ahs bhs)
       | _ -> false )
-    | Packet.APPLICATION_DATA, Packet.APPLICATION_DATA -> true (* why should I bother about payload? *)
+    | Packet.APPLICATION_DATA, Packet.APPLICATION_DATA -> true (* should I bother about payload? *)
   | _ -> false
 
-(* what we should do: *)
-(* hello extension normaliser / equivalence -- we might want to pass extension types *)
-(* what happens if handle didn't produce an output, but record-out came along? --
-     need a way to passthrough / match these as well! *)
-(* also, alerts/failure traces *)
-(* eaf3996a47b6fcf2 has reneg! *)
-let rec replay ?choices prev_state state pending_out t =
+open Sexplib.Conv
+
+type ret =
+  | End_of_trace of int
+  | Handle_alert of string
+  | Alert_in of string
+  | Stream_enc
+  | No_handshake_out
+  | Comparison_failed
+  | Alert_out_success
+  | Alert_out_fail
+with sexp
+
+(* TODO *)
+(* pass extension types in choices! *)
+(* what happens if handle didn't produce an output, but record-out came along? -- need a way to passthrough / match these as well! *)
+(* alert/failure traces *)
+let rec replay ?choices prev_state state pending_out t ccs alert_out =
   let handle_and_rec ?choices state hdr data xs =
     (* Printf.printf "now handling...\n" ; dbg_cc state.State.decryptor ; *)
     match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
@@ -278,23 +289,30 @@ let rec replay ?choices prev_state state pending_out t =
           let data, _ = normalise state.encryptor ver out in
           pending_out @ data
       in
-      let xs, pending = match data with
-        | None -> (xs, pending)
+      let prev, ccs = match hdr.Core.content_type with
+        | Packet.CHANGE_CIPHER_SPEC -> (state', succ ccs)
+        | _ -> (prev_state, ccs)
+      in
+      ( match data with
+        | None -> replay ?choices prev state' pending xs ccs alert_out
         | Some x ->
-          Printf.printf "received data %s\n" (Cstruct.to_string x);
+          (* Printf.printf "received data %s\n" (Cstruct.to_string x); *)
           if check_stream state.encryptor then
-            ([], [])
+            Stream_enc
           else
-            (xs, pending)
-      in
-      let prev = match hdr.Core.content_type with
-        | Packet.CHANGE_CIPHER_SPEC -> state'
-        | _ -> prev_state
-      in
-      replay ?choices prev state' pending xs
-    | `Fail (e, _) ->
+            replay ?choices prev state' pending xs ccs alert_out)
+    | `Fail (e, al) ->
       (* in the trace we better have an alert as well! *)
-      Printf.printf "sth failed %s\n" (dbg_fail e) ;
+      match alert_out with
+      | None ->
+        Printf.printf "sth failed %s\n" (dbg_fail e) ;
+        Handle_alert (dbg_fail e)
+      | Some x ->
+        let al = Engine.alert_of_failure e in
+        if snd x = al then
+          Alert_out_success
+        else
+          Alert_out_fail
   in
 
   match t with
@@ -321,16 +339,27 @@ let rec replay ?choices prev_state state pending_out t =
                   | _ -> assert false )
               | None ->
                 if List.length xs < 3 then
-                  Printf.printf "couldn't find handshake out, but trace isn't too long..\n"
+                  ((* Printf.printf "couldn't find handshake out, but trace isn't too long..\n" ; *)
+                   No_handshake_out)
                 else
                   assert false )
           | _ -> handle_and_rec ?choices state hdr data xs )
-      | Packet.ALERT -> Printf.printf "alert in! success\n"
+      | Packet.ALERT -> (* Printf.printf "alert in! success\n" ; *)
+        let enc = fixup_in_record hdr data in
+        let ver = state.State.handshake.State.protocol_version in
+        let dec, _ = normalise state.State.decryptor ver enc in
+        let _ = Engine.handle_tls ?choices state enc in
+        ( match dec with
+          | (_,x)::_ ->
+            ( match Reader.parse_alert x with
+              | Reader.Or_error.Ok (_, t) -> Alert_in (Packet.alert_type_to_string t)
+              | _ -> Alert_in (Printf.sprintf "unknown alert %d" (Cstruct.get_uint8 data 1) ))
+          | _ -> Alert_in (Printf.sprintf "unknown alert' %d" (Cstruct.get_uint8 data 1)) )
       | _ -> handle_and_rec ?choices state hdr data xs )
   | (`RecordOut (t, data))::xs ->
-    let rec cmp_data expected rcvd =
+    let rec cmp_data expected rcvd k =
       match expected, rcvd with
-      | [], [] -> []
+      | [], [] -> k []
       | [], _ -> assert false
       | (xh,x)::xs, (yh,y)::ys ->
         (* Printf.printf "comparing out %d vs %d\n" (Cstruct.len x) (Cstruct.len y) ; *)
@@ -338,31 +367,33 @@ let rec replay ?choices prev_state state pending_out t =
           (Printf.printf "mismatch! (computed)" ; Cstruct.hexdump x ; Printf.printf "stored" ; Cstruct.hexdump y ;
            assert false) ; *)
         if record_equal (xh,x) (yh,y) then
-          cmp_data xs ys
+          cmp_data xs ys k
         else
           (Printf.printf "mismatched records!\n";
-           assert false)
-      | xs, [] -> xs
+           Comparison_failed)
+      | xs, [] -> k xs
     in
     let version = state.handshake.protocol_version in
     let data = Writer.assemble_hdr version (t, data) in
     (* Printf.printf "record out, normalising\n" ; *)
     let ver = state.State.handshake.State.protocol_version in
     let data, e = normalise prev_state.encryptor ver data in
-    let leftover = cmp_data pending_out data in
-    replay ?choices { prev_state with State.encryptor = e } state leftover xs
-  | (`AlertIn alert_in)::_ -> Printf.printf "received alert %s\n" (dbg_al alert_in)
-  | (`AlertOut alert_out)::_ -> Printf.printf "sending alert %s\n" (dbg_al alert_out)
+    cmp_data pending_out data (fun leftover ->
+        replay ?choices { prev_state with State.encryptor = e } state leftover xs ccs alert_out)
+
   | (`StateIn s)::xs ->
     let enc = if check_stream s.State.encryptor then prev_state.State.encryptor else s.State.encryptor
     and dec = if check_stream s.State.decryptor then state.State.decryptor else s.State.decryptor
     in
-    replay ?choices { prev_state with State.encryptor = enc } { state with State.decryptor = dec } pending_out xs
-  | _::xs -> replay ?choices prev_state state pending_out xs
+    replay ?choices { prev_state with State.encryptor = enc } { state with State.decryptor = dec } pending_out xs ccs alert_out
+  | _::xs -> replay ?choices prev_state state pending_out xs ccs alert_out
   | [] ->
-    assert (List.length pending_out = 0) ;
-    Printf.printf "sucess!\n"
-    (* should do sth useful with state.. *)
+    match alert_out with
+    | None ->
+      assert (List.length pending_out = 0) ;
+      End_of_trace ccs
+    | Some x ->
+      Alert_out_fail
 
 let rec mix c s =
   match c, s with
@@ -391,31 +422,64 @@ let reconstruct =
   let state = Engine.server config in
   (state, trace)
 
-let doit (name, (ts, (alert, trace))) =
-  match alert, trace with
-  | None, [] -> ()
-  | None, _ ->
-    Printf.printf "file %s: " name;
+let doit res name ts alert_out trace =
+  match alert_out with
+  | None ->
+    (* Printf.printf "file %s: " name; *)
     let state = init trace in
-    replay state state [] trace
-  | _ -> ()
+    let r = replay state state [] trace 0 None in
+    if Hashtbl.mem res r then
+      let v = Hashtbl.find res r in
+      Hashtbl.replace res r (succ v)
+    else
+      Hashtbl.add res r 1
+  | Some al ->
+    let alert = Core.tls_alert_of_sexp al in
+    (* these are the traces ending with an AlertOut! *)
+    let state = init trace in
+    let r = replay state state [] trace 0 (Some alert) in
+    if Hashtbl.mem res r then
+      let v = Hashtbl.find res r in
+      Hashtbl.replace res r (succ v)
+    else
+      Hashtbl.add res r 1
+
+let analyse_res r =
+  Hashtbl.iter (fun k v ->
+      Printf.printf "%s : %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_ret k)) v)
+    r
 
 let run dir file pcap =
   Nocrypto.Rng.reseed (Cstruct.create 1);
   match dir, file, pcap with
   | Some dir, _, _ ->
-    let success, fail, skip = load_dir dir in
-    List.iter doit success
+    let res = Hashtbl.create 10 in
+    let ign = ref 0 in
+    let suc (name, (ts, (alert, traces))) =
+      try (
+        if List.length traces > 2 then
+          (Printf.printf "+%!" ;
+           doit res name ts alert traces)
+        else
+          ign := succ !ign )
+      with e -> Printf.printf "%s error: %s\n%!" name (Printexc.to_string e)
+    and fail _ = ign := succ !ign
+    in
+    let skip = load_dir dir suc fail in
+    Printf.printf "skipped %d, ignored %d\n" skip !ign;
+    analyse_res res
   | None, Some file, _ ->
     let ts, (alert, trace) = load file in
     ( match alert with
       | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
       | None ->
         let state = init trace in
-        replay state state [] trace)
+        let r = replay state state [] trace 0 None in
+        () )
   | None, None, Some _ ->
     let state, trace = reconstruct in
-    replay state state [] trace
+    let r = replay state state [] trace 0 None in
+    ()
   | _ -> assert false
 
 let trace_dir = ref None

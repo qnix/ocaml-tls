@@ -393,24 +393,19 @@ let load filename =
     (safe_ts (Filename.basename filename),
      eval_and_rev (load_single_file [] filename))
 
-let load_dir dir =
+let load_dir dir suc fai =
   let dirent = Unix.opendir dir in
   Unix.readdir dirent ; Unix.readdir dirent ; (* getting rid of . and .. *)
   let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in
-  let suc = ref []
-  and fai = ref []
-  and skip = ref []
-  and i = ref 1
-  in
-  while (* !i < 5000 && *) not (!filen = None) do
+  let ign = ref 0 in
+  while not (!filen = None) do
     let Some filename = !filen in
     (try
        let trace = load (Filename.concat dir filename) in
-       suc := (filename, trace) :: !suc
+       suc (filename, trace)
      with
-     | Trace_error e -> fai := (filename, e) :: !fai
-     | e -> Printf.printf "problem with file %s, skipping\n%!" filename; skip := filename :: !skip) ;
+     | Trace_error e -> fai (filename, e)
+     | e -> ign := succ !ign) ;
     (filen := try Some (Unix.readdir dirent) with End_of_file -> None) ;
-    i := succ !i
   done ;
-  (!suc, !fai, !skip)
+  !ign
