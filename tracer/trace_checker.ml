@@ -20,11 +20,8 @@ let priv, cert =
 
 open Nocrypto
 open Nocrypto.Dh
-let to_cstruct_sized { p; _ } z =
-  Numeric.Z.(to_cstruct_be ~size:(Uncommon.cdiv (bits p) 8) z)
-
 let public_of_secret (({ p; gg; _ } as group), { x }) =
-  to_cstruct_sized group (Z.(powm gg x p))
+  Numeric.Z.to_cstruct_be Z.(powm gg x p)
 
 (* pull out initial state *)
 let init (trace : trace list) =
@@ -470,12 +467,13 @@ let run dir file pcap =
     analyse_res res
   | None, Some file, _ ->
     let ts, (alert, trace) = load file in
-    ( match alert with
-      | Some x -> Printf.printf "got alert %s somewhere\n" (Sexplib.Sexp.to_string_hum x)
-      | None ->
-        let state = init trace in
-        let r = replay state state [] trace 0 None in
-        () )
+    let state = init trace in
+    let alert = match alert with
+      | None -> None
+      | Some x -> Some (Core.tls_alert_of_sexp x)
+    in
+    let r = replay state state [] trace 0 alert in
+    ()
   | None, None, Some _ ->
     let state, trace = reconstruct in
     let r = replay state state [] trace 0 None in
