@@ -29,25 +29,26 @@ Connection: Keep-Alive
 User-Agent: Mozilla/5.0 ()
 Accept-Encoding: gzip,deflate
 
-
+skipped 380, ignored 2690 failed 8
 
 No_handshake_out : 5589
 
 Alert_out_success : 187
 
+Stream_enc : 5077
+
+(Alert_in CLOSE_NOTIFY) : 14
+(Alert_in PROTOCOL_VERSION) : 29
+
 (Alert_out_different HANDSHAKE_FAILURE UNEXPECTED_MESSAGE) : 7
 (Alert_out_different UNEXPECTED_MESSAGE PROTOCOL_VERSION) : 207
 
-(Alert_out_fail BAD_RECORD_MAC) : 48 <-- fixed ones!
+(Alert_out_fail BAD_RECORD_MAC) : 48
 
 (Handle_alert "(Fatal (UnknownRecordVersion (0 0)))") : 2
 
 (Alert_in "unknown alert 128") : 143
 (Alert_in BAD_CERTIFICATE) : 23
-(Alert_in CLOSE_NOTIFY) : 14
-(Alert_in PROTOCOL_VERSION) : 29
-
-Stream_enc : 5077
 
 (End_of_trace 0) : 7476
 (End_of_trace 1) : 16050
@@ -72,9 +73,7 @@ let to_cstruct_sized { p; _ } z =
   Numeric.Z.(to_cstruct_be ~size:(Uncommon.cdiv (bits p) 8) z)
 
 let public_of_secret (({ p; gg; _ } as group), { x }) =
-  let data = to_cstruct_sized group Z.(powm gg x p) in
-  Printf.printf "public" ; Cstruct.hexdump data ;
-  data
+  to_cstruct_sized group Z.(powm gg x p)
 
 (* pull out initial state *)
 let init (trace : trace list) =
@@ -355,7 +354,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
       ( match data with
         | None -> replay ?choices prev state' pending xs ccs alert_out
         | Some x ->
-          Printf.printf "received data %s\n" (Cstruct.to_string x);
+          (* Printf.printf "received data %s\n" (Cstruct.to_string x); *)
           if check_stream state.encryptor then
             Stream_enc
           else
@@ -364,7 +363,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
       (* in the trace we better have an alert as well! *)
       match alert_out with
       | None ->
-        Printf.printf "sth failed %s\n" (dbg_fail e) ;
+        (* Printf.printf "sth failed %s\n" (dbg_fail e) ; *)
         Handle_alert (dbg_fail e)
       | Some x ->
         let al = Engine.alert_of_failure e in
