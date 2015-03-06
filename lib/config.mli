@@ -21,6 +21,7 @@ type config = {
   hashes            : Hash.hash list ; (** ordered list of supported hash algorithms (regarding preference) *)
   use_reneg         : bool ; (** endpoint should accept renegotiation requests *)
   secure_reneg      : bool ; (** other end must use secure renegotiation (RFC 5746) *)
+  use_scsv          : bool ; (** use SCSV *)
   authenticator     : X509.Authenticator.t option ; (** optional X509 authenticator *)
   peer_name         : string option ; (** optional name of other endpoint (used for SNI RFC4366) *)
   own_certificates  : own_cert ; (** optional default certificate chain and other certificate chains *)
@@ -85,6 +86,7 @@ val client :
   ?reneg         : bool ->
   ?certificates  : own_cert ->
   ?secure_reneg  : bool ->
+  ?scsv          : bool ->
   unit -> client
 
 (** [server ?ciphers ?version ?hashes ?reneg ?certificates ?authenticator ?secure_reneg] is [server] configuration with the given parameters *)
@@ -97,4 +99,5 @@ val server :
   ?certificates  : own_cert ->
   ?authenticator : X509.Authenticator.t ->
   ?secure_reneg  : bool ->
+  ?scsv          : bool ->
   unit -> server

@@ -302,9 +302,12 @@ let answer_client_hello choices state (ch : client_hello) raw =
     let cciphers = ch.ciphersuites in
     guard (client_hello_valid ch) (`Fatal `InvalidClientHello) >>= fun () ->
     choices.version ch.version >>= fun version ->
-(*    guard (not (List.mem Packet.TLS_FALLBACK_SCSV cciphers) ||
-           version = max_protocol_version config.protocol_versions)
-      (`Fatal `InappropriateFallback) >>= fun () -> *)
+    ( if config.use_scsv then
+        guard (not (List.mem Packet.TLS_FALLBACK_SCSV cciphers) ||
+               version = max_protocol_version config.protocol_versions)
+          (`Fatal `InappropriateFallback)
+      else
+        return ()) >>= fun () ->
     let theirs = get_secure_renegotiation ch.extensions in
     ensure_reneg config.secure_reneg cciphers theirs >|= fun () ->
 

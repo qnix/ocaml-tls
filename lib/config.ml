@@ -22,6 +22,7 @@ type config = {
   (* signatures        : Packet.signature_algorithm_type list ; *)
   use_reneg         : bool ;
   secure_reneg      : bool ;
+  use_scsv          : bool ;
   authenticator     : X509.Authenticator.t option ;
   peer_name         : string option ;
   own_certificates  : own_cert ;
@@ -78,6 +79,7 @@ let default_config = {
   hashes            = default_hashes ;
   use_reneg         = true ;
   secure_reneg      = true ;
+  use_scsv          = true ;
   authenticator     = None ;
   peer_name         = None ;
   own_certificates  = `None ;
@@ -216,6 +218,9 @@ let config_of_sexp cfg =
         | List [ Atom "hashes" ; hashes ] ->
           let hashes = list_of_sexp Hash.hash_of_sexp hashes in
           { config with hashes }
+        | List [ Atom "use_scsv" ; scsv ] ->
+          let use_scsv = bool_of_sexp scsv in
+          { config with use_scsv }
         | List [ Atom "use_reneg" ; reneg ] ->
           let use_reneg = bool_of_sexp reneg in
           { config with use_reneg }
@@ -250,6 +255,7 @@ let sexp_of_config c =
     "authenticator"  , sexp_of_authenticator_o c.authenticator ;
     "peer_name"      , (sexp_of_option sexp_of_string) c.peer_name ;
     "certificates"   , sexp_of_own_cert c.own_certificates ;
+    "use_scsv"       , sexp_of_bool c.use_scsv ;
   ]
 
 (* ... *)
@@ -266,7 +272,7 @@ let peer conf name = { conf with peer_name = Some name }
 let (<?>) ma b = match ma with None -> b | Some a -> a
 
 let client
-  ~authenticator ?ciphers ?version ?hashes ?reneg ?certificates ?secure_reneg () =
+  ~authenticator ?ciphers ?version ?hashes ?reneg ?certificates ?secure_reneg ?scsv () =
   let config =
     { default_config with
         authenticator     = Some authenticator ;
@@ -274,19 +280,21 @@ let client
         protocol_versions = version      <?> default_config.protocol_versions ;
         hashes            = hashes       <?> default_config.hashes ;
         use_reneg         = reneg        <?> default_config.use_reneg ;
+        use_scsv          = scsv         <?> default_config.use_scsv ;
         own_certificates  = certificates <?> default_config.own_certificates ;
         secure_reneg      = secure_reneg <?> default_config.secure_reneg ;
     } in
   ( validate_common config ; validate_client config ; config )
 
 let server
-  ?ciphers ?version ?hashes ?reneg ?certificates ?authenticator ?secure_reneg () =
+  ?ciphers ?version ?hashes ?reneg ?certificates ?authenticator ?secure_reneg ?scsv () =
   let config =
     { default_config with
         ciphers           = ciphers      <?> default_config.ciphers ;
         protocol_versions = version      <?> default_config.protocol_versions ;
         hashes            = hashes       <?> default_config.hashes ;
         use_reneg         = reneg        <?> default_config.use_reneg ;
+        use_scsv          = scsv         <?> default_config.use_scsv ;
         own_certificates  = certificates <?> default_config.own_certificates ;
         authenticator     = authenticator ;
         secure_reneg      = secure_reneg <?> default_config.secure_reneg ;
