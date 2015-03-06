@@ -10,6 +10,53 @@ open State
   - fragmentation on both levels: record and handshake
   - incomplete traces (such as "()")
   - traces where version in first handshake is not the same as the one in the upcoming (70edd70bfe97ce96 is a great example of this) -- occurs when searching for the next server hello to fill the choices
+
+8 throw exceptions:
+d013963be0b88f13 -- bad record mac (as recorded)
+90fe96dbbf68e83f -- 01
+7da95c2334ae05df -- bad record mac (as recorded)
+de46d6f71bc1badb -- bad record mac (as recorded)
+a9a63b02c10f2020 -- bad record mac (as recorded)
+587432efd420d135 -- bad record mac (as recorded)
+e307e05290456548 -- bad record mac (as recorded) --> all unclear (tried with 00 prepended)
+fd8f542f9e1d1f82 -- master secret is different:
+   works again if prepend shared with 00 (is 127 byte, thus making it 128)
+
+APPDATA:
+GET / HTTP/1.1
+Host: tls.openmirage.org
+Connection: Keep-Alive
+User-Agent: Mozilla/5.0 ()
+Accept-Encoding: gzip,deflate
+
+
+
+No_handshake_out : 5589
+
+Alert_out_success : 187
+
+(Alert_out_different HANDSHAKE_FAILURE UNEXPECTED_MESSAGE) : 7
+(Alert_out_different UNEXPECTED_MESSAGE PROTOCOL_VERSION) : 207
+
+(Alert_out_fail BAD_RECORD_MAC) : 48 <-- fixed ones!
+
+(Handle_alert "(Fatal (UnknownRecordVersion (0 0)))") : 2
+
+(Alert_in "unknown alert 128") : 143
+(Alert_in BAD_CERTIFICATE) : 23
+(Alert_in CLOSE_NOTIFY) : 14
+(Alert_in PROTOCOL_VERSION) : 29
+
+Stream_enc : 5077
+
+(End_of_trace 0) : 7476
+(End_of_trace 1) : 16050
+(End_of_trace 2) : 484
+(End_of_trace 3) : 66
+(End_of_trace 4) : 11
+(End_of_trace 5) : 7
+(End_of_trace 7) : 1
+
  *)
 
 let cs_mmap file =
@@ -21,8 +68,13 @@ let priv, cert =
 
 open Nocrypto
 open Nocrypto.Dh
+let to_cstruct_sized { p; _ } z =
+  Numeric.Z.(to_cstruct_be ~size:(Uncommon.cdiv (bits p) 8) z)
+
 let public_of_secret (({ p; gg; _ } as group), { x }) =
-  Numeric.Z.to_cstruct_be Z.(powm gg x p)
+  let data = to_cstruct_sized group Z.(powm gg x p) in
+  Printf.printf "public" ; Cstruct.hexdump data ;
+  data
 
 (* pull out initial state *)
 let init (trace : trace list) =
@@ -157,6 +209,12 @@ let normalise crypt ver data =
           else
             (Printf.printf "dec failed %s\n" (dbg_fail e) ;
              dbg_cc enc ;
+             Printf.printf "ver %s\nmac" (Printer.tls_version_to_string ver) ;
+             (match enc with
+              | Some x -> (match x.cipher_st with
+                  | CBC c -> Cstruct.hexdump c.hmac_secret
+                  | _ -> ())
+              | _ -> ()) ;
              Cstruct.hexdump data ;
              assert false))
         (crypt, []) xs
@@ -297,7 +355,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
       ( match data with
         | None -> replay ?choices prev state' pending xs ccs alert_out
         | Some x ->
-          (* Printf.printf "received data %s\n" (Cstruct.to_string x); *)
+          Printf.printf "received data %s\n" (Cstruct.to_string x);
           if check_stream state.encryptor then
             Stream_enc
           else
@@ -371,7 +429,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
           cmp_data xs ys k
         else
           (Printf.printf "mismatched records!\n";
-           Comparison_failed)
+           Comparison_failed ; assert false)
       | xs, [] -> k xs
     in
     let version = state.handshake.protocol_version in
@@ -386,16 +444,20 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
     let maybe_seq recs sin =
       match recs, sin with
       | Some st, Some sin ->
-        let cipher_st = match st.cipher_st, sin.cipher_st with
-          | Stream s, Stream _ -> Stream s
-          | CCM s, CCM _ -> CCM s
-          | CBC s, CBC t ->
-            let iv_mode = match s.iv_mode, t.iv_mode with
-              | Random_iv, Random_iv -> Random_iv
-              | Iv _, Iv r -> Iv r
-            in
-            CBC { s with iv_mode }
-        and sequence = sin.sequence
+        let sequence = sin.sequence in
+        let cipher_st =
+          if sequence = 0L then
+            st.cipher_st
+          else
+            match st.cipher_st, sin.cipher_st with
+            | Stream s, Stream _ -> Stream s
+            | CCM s, CCM _ -> CCM s
+            | CBC s, CBC t ->
+              let iv_mode = match s.iv_mode, t.iv_mode with
+                | Random_iv, Random_iv -> Random_iv
+                | Iv _, Iv r -> Iv r
+              in
+              CBC { s with iv_mode }
         in
         Some { sequence ; cipher_st }
       | _ -> recs
@@ -475,7 +537,9 @@ let run dir file pcap =
   match dir, file, pcap with
   | Some dir, _, _ ->
     let res = Hashtbl.create 10 in
-    let ign = ref 0 in
+    let ign = ref 0
+    and failed = ref 0
+    in
     let suc (name, (ts, (alert, traces))) =
       try (
         if List.length traces > 2 then
@@ -483,11 +547,11 @@ let run dir file pcap =
            doit res name ts alert traces)
         else
           ign := succ !ign )
-      with e -> Printf.printf "%s error: %s\n%!" name (Printexc.to_string e)
+      with e -> Printf.printf "%s error: %s\n%!" name (Printexc.to_string e) ; failed := succ !failed
     and fail _ = ign := succ !ign
     in
     let skip = load_dir dir suc fail in
-    Printf.printf "skipped %d, ignored %d\n" skip !ign;
+    Printf.printf "skipped %d, ignored %d failed %d\n" skip !ign !failed;
     analyse_res res
   | None, Some file, _ ->
     let ts, (alert, trace) = load file in
