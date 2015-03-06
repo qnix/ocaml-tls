@@ -400,12 +400,14 @@ let load_dir (dir : string) (suc : (string * (string * (Sexplib.Sexp.t option * 
   let ign = ref 0 in
   while not (!filen = None) do
     let Some filename = !filen in
-    (try
-       let trace = load (Filename.concat dir filename) in
-       suc (filename, trace)
-     with
-     | Trace_error e -> fai (filename, e)
-     | e -> ign := succ !ign) ;
+    (match
+      (try Some (load (Filename.concat dir filename))
+       with
+       | Trace_error e -> fai (filename, e) ; None
+       | e -> ign := succ !ign ; None)
+    with
+    | Some trace -> suc (filename, trace)
+    | None -> ()) ;
     (filen := try Some (Unix.readdir dirent) with End_of_file -> None) ;
   done ;
   !ign
