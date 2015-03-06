@@ -156,6 +156,7 @@ let normalise crypt ver data =
             (enc, (hdr, ccs) :: acc)
           else
             (Printf.printf "dec failed %s\n" (dbg_fail e) ;
+             dbg_cc enc ;
              Cstruct.hexdump data ;
              assert false))
         (crypt, []) xs
@@ -384,13 +385,28 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
   | (`StateIn s)::xs ->
     let maybe_seq recs sin =
       match recs, sin with
-      | Some st, Some sin -> Some { st with sequence = sin.sequence }
+      | Some st, Some sin ->
+        let cipher_st = match st.cipher_st, sin.cipher_st with
+          | Stream s, Stream _ -> Stream s
+          | CCM s, CCM _ -> CCM s
+          | CBC s, CBC t ->
+            let iv_mode = match s.iv_mode, t.iv_mode with
+              | Random_iv, Random_iv -> Random_iv
+              | Iv _, Iv r -> Iv r
+            in
+            CBC { s with iv_mode }
+        and sequence = sin.sequence
+        in
+        Some { sequence ; cipher_st }
       | _ -> recs
     in
     let encryptor = maybe_seq prev_state.encryptor s.encryptor
     and decryptor = maybe_seq state.decryptor s.decryptor
     in
-    replay ?choices { prev_state with encryptor } { state with decryptor } pending_out xs ccs alert_out
+    replay ?choices
+      { prev_state with encryptor }
+      { state with decryptor }
+      pending_out xs ccs alert_out
   | _::xs -> replay ?choices prev_state state pending_out xs ccs alert_out
   | [] ->
     match alert_out with
