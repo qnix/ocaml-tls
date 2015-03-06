@@ -144,10 +144,10 @@ let normalise crypt ver data =
     assert (Cstruct.len rest = 0) ;
     (* Printf.printf "now trying to decrypt %d packets\n" (List.length xs) ; *)
     let e, acc = List.fold_left (fun (enc, acc) (hdr, data) ->
-        dbg_cc enc; Cstruct.hexdump data ;
+        (* dbg_cc enc; Cstruct.hexdump data ; *)
         match Engine.decrypt ver enc hdr.Core.content_type data with
         | Ok (enc, d) ->
-          Printf.printf "dec is %d\n" (Cstruct.len d) ; Cstruct.hexdump d ;
+          (* Printf.printf "dec is %d\n" (Cstruct.len d) ; Cstruct.hexdump d ; *)
           (enc, (hdr, d) :: acc)
         | Error e ->
           if hdr.Core.content_type == Packet.CHANGE_CIPHER_SPEC (* && Cstruct.len data = 1 *) then
@@ -268,7 +268,7 @@ type ret =
   | No_handshake_out
   | Comparison_failed
   | Alert_out_success
-  | Alert_out_fail
+  | Alert_out_fail of string
 with sexp
 
 (* TODO *)
@@ -311,12 +311,12 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
         if snd x = al then
           Alert_out_success
         else
-          Alert_out_fail
+          Alert_out_fail "different"
   in
 
   match t with
   | (`RecordIn (hdr, data))::xs ->
-    Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
+    (* Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ; *)
     ( match hdr.Core.content_type with
       | Packet.HANDSHAKE ->
         let enc = fixup_in_record hdr data in
@@ -397,7 +397,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
       assert (List.length pending_out = 0) ;
       End_of_trace ccs
     | Some x ->
-      Alert_out_fail
+      Alert_out_fail "reached end without encountering expected alert"
 
 let rec mix c s =
   match c, s with
@@ -480,7 +480,7 @@ let run dir file pcap =
       | Some x -> Some (Core.tls_alert_of_sexp x)
     in
     let r = replay state state [] trace 0 alert in
-    ()
+    Printf.printf "result %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_ret r))
   | None, None, Some _ ->
     let state, trace = reconstruct in
     let r = replay state state [] trace 0 None in
