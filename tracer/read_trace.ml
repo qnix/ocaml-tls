@@ -22,7 +22,7 @@ open Tls
    sent out Finished (handshake-out Finished below), data structure
    (of 0.3) has a session list in the handshake_state record *)
 
-type error =
+type read_error =
   | InvalidInitialState of string
   | InvalidHmacKey
   | InvalidSequenceNumber
@@ -32,7 +32,7 @@ type error =
   | EmptyDir
 with sexp
 
-exception Trace_error of error
+exception Trace_error of read_error
 
 let fail e = raise (Trace_error e)
 
@@ -393,7 +393,7 @@ let load filename =
     (safe_ts (Filename.basename filename),
      eval_and_rev (load_single_file [] filename))
 
-let load_dir dir suc fai =
+let load_dir (dir : string) (suc : (string * (string * (Sexplib.Sexp.t option * trace list)) -> unit)) (fai : string * read_error -> unit) =
   let dirent = Unix.opendir dir in
   Unix.readdir dirent ; Unix.readdir dirent ; (* getting rid of . and .. *)
   let filen = ref (try Some (Unix.readdir dirent) with End_of_file -> None) in

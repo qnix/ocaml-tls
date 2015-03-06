@@ -1,6 +1,7 @@
 open Read_trace
 
 open Tls
+open State
 
 let cs_mmap file =
   Unix_cstruct.of_fd Unix.(openfile file [O_RDONLY] 0)
@@ -216,17 +217,17 @@ let analyse_alerts hashtbl =
       find_trace (function `State _ -> true | `StateIn _ -> true | `StateOut _ -> true | _ -> false) (List.rev t)
     with
     | Some (`State x) | Some (`StateIn x) | Some (`StateOut x) ->
-      (match x.State.handshake.State.machina with
-       | State.Server State.AwaitClientHello -> "await client hello"
-       | State.Server State.AwaitClientHelloRenegotiate -> "await client hello renegotiate"
-       | State.Server (State.AwaitClientCertificate_RSA _) -> "await client certificate RSA"
-       | State.Server (State.AwaitClientCertificate_DHE_RSA _) -> "await client certificate DHE_RSA"
-       | State.Server (State.AwaitClientKeyExchange_RSA _) -> "await client key exchange RSA"
-       | State.Server (State.AwaitClientKeyExchange_DHE_RSA _) -> "await client key exchange DHE_RSA"
-       | State.Server (State.AwaitClientCertificateVerify _) -> "await client certificate verify"
-       | State.Server (State.AwaitClientChangeCipherSpec _) -> "await client change cipher spec"
-       | State.Server (State.AwaitClientFinished _) -> "await client finished"
-       | State.Server State.Established -> "established"
+      (match x.handshake.machina with
+       | Server AwaitClientHello -> "await client hello"
+       | Server AwaitClientHelloRenegotiate -> "await client hello renegotiate"
+       | Server (AwaitClientCertificate_RSA _) -> "await client certificate RSA"
+       | Server (AwaitClientCertificate_DHE_RSA _) -> "await client certificate DHE_RSA"
+       | Server (AwaitClientKeyExchange_RSA _) -> "await client key exchange RSA"
+       | Server (AwaitClientKeyExchange_DHE_RSA _) -> "await client key exchange DHE_RSA"
+       | Server (AwaitClientCertificateVerify _) -> "await client certificate verify"
+       | Server (AwaitClientChangeCipherSpec _) -> "await client change cipher spec"
+       | Server (AwaitClientFinished _) -> "await client finished"
+       | Server Established -> "established"
        | _ -> assert false )
     | _ -> assert false
   in
@@ -296,9 +297,9 @@ let analyse_alerts hashtbl =
     let in_state = state t
     and ch = client_hello t
     in
-    let config = { in_state.State.handshake.State.config with
+    let config = { in_state.handshake.config with
                    own_certificates = `Single (cert, priv) } in
-    let handshake = { in_state.State.handshake with config } in
+    let handshake = { in_state.handshake with config } in
     let in_state = { in_state with handshake } in
     let extract_ch b =
       match Reader.parse_handshake (snd b) with
@@ -415,7 +416,7 @@ let run dir file =
     analyse_success successes ;
     analyse_renegs successes ;
     Hashtbl.iter (fun k v ->
-        Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_error k)) (List.length v))
+        Printf.printf "reason %s count %d\n" (Sexplib.Sexp.to_string_hum (sexp_of_read_error k)) (List.length v))
       failures
 
   | None, Some file ->
@@ -430,7 +431,7 @@ let run dir file =
             Hashtbl.add hash file (ts, traces) ;
             analyse_success hash)
      with
-       Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_error e)))
+       Trace_error e -> Printf.printf "problem %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_read_error e)))
   | _ -> assert false
 
 

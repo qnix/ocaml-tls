@@ -1,6 +1,7 @@
 open Read_trace
 
 open Tls
+open State
 
 (* why this is all so hackish:
   - incomplete traces (hopping sequence numbers of incoming records (after 1 comes 120))
@@ -46,7 +47,7 @@ let find_hs_out dec ver t =
     (try (
        let sout = List.find (function `StateOut _ -> true | _ -> false) t in
        match sout with
-       | `StateOut sout -> ver = sout.State.handshake.State.protocol_version
+       | `StateOut sout -> ver = sout.handshake.protocol_version
        | _ -> true)
      with Not_found -> true)
   then
@@ -66,15 +67,15 @@ let find_dh_sent (trace : trace list) =
     find_trace
       (function
         | `StateOut st ->
-          ( match st.State.handshake.State.machina with
-            | State.Server (State.AwaitClientKeyExchange_DHE_RSA _) -> true
+          ( match st.handshake.machina with
+            | Server (AwaitClientKeyExchange_DHE_RSA _) -> true
             | _ -> false )
         | _ -> false)
       trace
   with
   | Some (`StateOut st) ->
-    ( match st.State.handshake.State.machina with
-      | State.Server (State.AwaitClientKeyExchange_DHE_RSA (_, dh_sent, _)) ->
+    ( match st.handshake.machina with
+      | Server (AwaitClientKeyExchange_DHE_RSA (_, dh_sent, _)) ->
         let group, secret = dh_sent in
         Some (group, secret, public_of_secret dh_sent)
       | _ -> None )
@@ -85,12 +86,12 @@ let find_dh_sent (trace : trace list) =
 (* sanity: min >= chosen >= max ; requested >= chosen *)
 let version_agreed configured chosen requested =
   match Handshake_common.supported_protocol_version configured (Supported chosen) with
-  | None -> State.fail (`Error (`NoConfiguredVersion chosen))
+  | None -> fail (`Error (`NoConfiguredVersion chosen))
   | Some _ ->
     if Core.version_ge requested chosen then
-      State.return chosen
+      return chosen
     else
-      State.fail (`Error (`NoConfiguredVersion chosen))
+      fail (`Error (`NoConfiguredVersion chosen))
 
 (* again, chosen better be part of configured -- and also chosen be a mem of requested *)
 (* this is slightly weak -- depending on sni / certificate we have to limit the decision *)
@@ -98,9 +99,9 @@ let cipher_agreed _certificates configured chosen requested =
   if List.mem chosen configured &&
      List.mem chosen (Utils.filter_map ~f:Ciphersuite.any_ciphersuite_to_ciphersuite requested)
   then
-    State.return chosen
+    return chosen
   else
-    State.fail (`Error (`NoConfiguredCiphersuite [chosen]))
+    fail (`Error (`NoConfiguredCiphersuite [chosen]))
 
 let fixup_initial_state state raw next =
   let server_hello = parse_server_hello raw in
@@ -109,11 +110,11 @@ let fixup_initial_state state raw next =
     | Ciphersuite.DHE_RSA -> find_dh_sent next
   in
   let config = {
-    state.State.handshake.State.config with
+    state.handshake.config with
       own_certificates = `Single (cert, priv) ;
       use_scsv = false ;
   } in
-  let choices = State.{
+  let choices = {
       version = version_agreed config.protocol_versions server_hello.Core.version ;
       cipher = cipher_agreed config.own_certificates config.ciphers server_hello.Core.ciphersuites ;
       random = (fun () -> server_hello.Core.random) ;
@@ -121,11 +122,11 @@ let fixup_initial_state state raw next =
       dh_secret = (fun () -> dh_sent)
     }
   in
-  let handshake = { state.State.handshake with config } in
+  let handshake = { state.handshake with config } in
   (choices, server_hello.Core.version, { state with handshake })
 
 
-let dbg_cc c = Printf.printf "cc %s\n" (Sexplib.Sexp.to_string_hum (State.sexp_of_crypto_state c))
+let dbg_cc c = Printf.printf "cc %s\n" (Sexplib.Sexp.to_string_hum (sexp_of_crypto_state c))
 
 let dbg_al al = Sexplib.Sexp.to_string_hum (Core.sexp_of_tls_alert al)
 
@@ -133,22 +134,22 @@ let dbg_fail f = Sexplib.Sexp.to_string_hum (Engine.sexp_of_failure f)
 
 let check_stream = function
   | None -> false
-  | Some x -> match x.State.cipher_st with
-    | State.Stream _ -> true
+  | Some x -> match x.cipher_st with
+    | Stream _ -> true
     | _ -> false
 
 let normalise crypt ver data =
   match Engine.separate_records data with
-  | State.Ok (xs, rest) ->
+  | Ok (xs, rest) ->
     assert (Cstruct.len rest = 0) ;
     (* Printf.printf "now trying to decrypt %d packets\n" (List.length xs) ; *)
     let e, acc = List.fold_left (fun (enc, acc) (hdr, data) ->
-        (* dbg_cc enc; (* Cstruct.hexdump data ; *) *)
+        dbg_cc enc; Cstruct.hexdump data ;
         match Engine.decrypt ver enc hdr.Core.content_type data with
-        | State.Ok (enc, d) ->
-          (* Printf.printf "dec is %d\n" (Cstruct.len d) ; *)
+        | Ok (enc, d) ->
+          Printf.printf "dec is %d\n" (Cstruct.len d) ; Cstruct.hexdump d ;
           (enc, (hdr, d) :: acc)
-        | State.Error e ->
+        | Error e ->
           if hdr.Core.content_type == Packet.CHANGE_CIPHER_SPEC (* && Cstruct.len data = 1 *) then
             (* we're a bit unlucky, but let's pretend to be good *)
             let ccs = Writer.assemble_change_cipher_spec in
@@ -245,7 +246,7 @@ let record_equal (ahdr, adata) (bhdr, bdata) =
   | Packet.ALERT, Packet.ALERT -> true (* since we hangup after alert anyways *)
   | Packet.HANDSHAKE, Packet.HANDSHAKE ->
     ( match Engine.separate_handshakes adata, Engine.separate_handshakes bdata with
-      | State.Ok (ahs, arest), State.Ok (bhs, brest) when
+      | Ok (ahs, arest), Ok (bhs, brest) when
           (Cstruct.len arest = 0) && (Cstruct.len brest = 0) ->
         let cmp1 (a, b) =
           match Reader.parse_handshake a, Reader.parse_handshake b with
@@ -276,14 +277,14 @@ with sexp
 (* alert/failure traces *)
 let rec replay ?choices prev_state state pending_out t ccs alert_out =
   let handle_and_rec ?choices state hdr data xs =
-    (* Printf.printf "now handling...\n" ; dbg_cc state.State.decryptor ; *)
+    (* Printf.printf "now handling...\n" ; dbg_cc state.decryptor ; *)
     match Engine.handle_tls ?choices state (fixup_in_record hdr data) with
     | `Ok (`Ok state', `Response out, `Data data) ->
       let pending = match out with
         | None -> (* Printf.printf "empty out!?\n"; *) pending_out
         | Some out ->
           (* Printf.printf "output from handle_tls, normalising\n" ; *)
-          let ver = state.State.handshake.State.protocol_version in
+          let ver = state.handshake.protocol_version in
           let data, _ = normalise state.encryptor ver out in
           pending_out @ data
       in
@@ -315,21 +316,21 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
 
   match t with
   | (`RecordIn (hdr, data))::xs ->
-    (* Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ; *)
+    Printf.printf "record-in %s\n" (Packet.content_type_to_string hdr.Core.content_type) ;
     ( match hdr.Core.content_type with
       | Packet.HANDSHAKE ->
         let enc = fixup_in_record hdr data in
-        let ver = state.State.handshake.State.protocol_version in
+        let ver = state.handshake.protocol_version in
         (* Printf.printf "normalising in record-in to find whether it is a clienthello\n"; *)
-        let dec, _ = normalise state.State.decryptor ver enc in
+        let dec, _ = normalise state.decryptor ver enc in
         ( match dec with
           | (_,x)::_ when Cstruct.get_uint8 x 0 = 1->
             (* Printf.printf "decrypted (%d):" (Cstruct.len x) ; Cstruct.hexdump x ; *)
-            ( match find_hs_out state.State.decryptor ver xs with
+            ( match find_hs_out state.decryptor ver xs with
               | Some (t, out) ->
                 let out_data = Writer.assemble_hdr ver (t, out) in
                 (* Printf.printf "normalising out_data\n" ; *)
-                ( match normalise prev_state.State.encryptor ver out_data with
+                ( match normalise prev_state.encryptor ver out_data with
                   | (_,x)::_,_ ->
                     assert (Cstruct.get_uint8 x 0 = 2) ;
                     let choices, version, state = fixup_initial_state state x xs in
@@ -344,8 +345,8 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
           | _ -> handle_and_rec ?choices state hdr data xs )
       | Packet.ALERT -> (* Printf.printf "alert in! success\n" ; *)
         let enc = fixup_in_record hdr data in
-        let ver = state.State.handshake.State.protocol_version in
-        let dec, _ = normalise state.State.decryptor ver enc in
+        let ver = state.handshake.protocol_version in
+        let dec, _ = normalise state.decryptor ver enc in
         let _ = Engine.handle_tls ?choices state enc in
         ( match dec with
           | (_,x)::_ ->
@@ -374,16 +375,21 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
     let version = state.handshake.protocol_version in
     let data = Writer.assemble_hdr version (t, data) in
     (* Printf.printf "record out, normalising\n" ; *)
-    let ver = state.State.handshake.State.protocol_version in
+    let ver = state.handshake.protocol_version in
     let data, e = normalise prev_state.encryptor ver data in
     cmp_data pending_out data (fun leftover ->
-        replay ?choices { prev_state with State.encryptor = e } state leftover xs ccs alert_out)
+        replay ?choices { prev_state with encryptor = e } state leftover xs ccs alert_out)
 
   | (`StateIn s)::xs ->
-    let enc = if check_stream s.State.encryptor then prev_state.State.encryptor else s.State.encryptor
-    and dec = if check_stream s.State.decryptor then state.State.decryptor else s.State.decryptor
+    let maybe_seq recs sin =
+      match recs, sin with
+      | Some st, Some sin -> Some { st with sequence = sin.sequence }
+      | _ -> recs
     in
-    replay ?choices { prev_state with State.encryptor = enc } { state with State.decryptor = dec } pending_out xs ccs alert_out
+    let encryptor = maybe_seq prev_state.encryptor s.encryptor
+    and decryptor = maybe_seq state.decryptor s.decryptor
+    in
+    replay ?choices { prev_state with encryptor } { state with decryptor } pending_out xs ccs alert_out
   | _::xs -> replay ?choices prev_state state pending_out xs ccs alert_out
   | [] ->
     match alert_out with
@@ -398,12 +404,12 @@ let rec mix c s =
   | [], [] -> []
   | [c], [] ->
     ( match Engine.separate_records c with
-      | State.Ok (xs, rest) ->
+      | Ok (xs, rest) ->
         assert (Cstruct.len rest = 0) ;
         List.map (fun x -> `RecordIn x) xs )
   | c::cs, s::ss ->
     match Engine.separate_records c, Engine.separate_records s with
-    | State.Ok (xs, rest), State.Ok (ys, rest') ->
+    | Ok (xs, rest), Ok (ys, rest') ->
       assert (Cstruct.len rest = 0) ;
       assert (Cstruct.len rest' = 0) ;
       let c = List.map (fun x -> `RecordIn x) xs in
