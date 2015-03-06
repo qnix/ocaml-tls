@@ -110,7 +110,8 @@ let fixup_initial_state state raw next =
   in
   let config = {
     state.State.handshake.State.config with
-    own_certificates = `Single (cert, priv)
+      own_certificates = `Single (cert, priv) ;
+      use_scsv = false ;
   } in
   let choices = State.{
       version = version_agreed config.protocol_versions server_hello.Core.version ;
