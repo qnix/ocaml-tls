@@ -268,7 +268,8 @@ type ret =
   | No_handshake_out
   | Comparison_failed
   | Alert_out_success
-  | Alert_out_fail of string
+  | Alert_out_different of Packet.alert_type * Packet.alert_type
+  | Alert_out_fail of Packet.alert_type
 with sexp
 
 (* TODO *)
@@ -311,7 +312,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
         if snd x = al then
           Alert_out_success
         else
-          Alert_out_fail "different"
+          Alert_out_different (snd x, al)
   in
 
   match t with
@@ -397,7 +398,7 @@ let rec replay ?choices prev_state state pending_out t ccs alert_out =
       assert (List.length pending_out = 0) ;
       End_of_trace ccs
     | Some x ->
-      Alert_out_fail "reached end without encountering expected alert"
+      Alert_out_fail (snd x)
 
 let rec mix c s =
   match c, s with
