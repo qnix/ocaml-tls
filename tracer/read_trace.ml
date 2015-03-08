@@ -207,7 +207,7 @@ let conv_handshake maybe_state = function
         (Some sessions, None, None, None, None) eles
     with
     | Some session, Some protocol_version, Some machina, Some config, Some hs_fragment ->
-      State.{ session ; protocol_version ; machina ; config ; hs_fragment }
+      State.({ session ; protocol_version ; machina ; config ; hs_fragment })
     | _ -> assert false
 
 
@@ -260,7 +260,7 @@ let conv_state maybe_st = function
         (None, None, None, None) xs
     with
     | Some handshake, Some decryptor, Some encryptor, Some fragment ->
-      State.{ handshake ; decryptor ; encryptor ; fragment }
+      State.({ handshake ; decryptor ; encryptor ; fragment })
     | _ -> assert false
 
 type trace = [
@@ -305,7 +305,7 @@ let process_sexp acc x =
     and content_type = Packet.content_type_of_sexp ct
     and data = Cstruct_s.t_of_sexp data
     in
-    (`RecordIn (Core.{ content_type ; version }, data)) :: acc
+    (`RecordIn (Core.({ content_type ; version }), data)) :: acc
   | List [ Atom "record-out" ; record ] ->
     (`RecordOut (State.record_of_sexp record)) :: acc
   | List [ Atom "application-data-in" ; data ] ->
